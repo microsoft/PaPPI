@@ -10,6 +10,7 @@ Windows, `xgboost-cpu` replaces `xgboost`.
 |---|---|---|---|
 | numpy | 2.5.3 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | https://numpy.org |
 | pandas | 3.0.6 | BSD | https://pandas.pydata.org |
+| pyarrow | 26.0.0 | Apache-2.0 | https://arrow.apache.org |
 | PyYAML | 6.0.3 | MIT | https://pyyaml.org/ |
 | rich | 15.0.0 | MIT | https://github.com/Textualize/rich |
 | scikit-learn | 1.9.1 | BSD-3-Clause | https://scikit-learn.org |
@@ -36,7 +37,7 @@ Windows, `xgboost-cpu` replaces `xgboost`.
 | affine | 3.0.1 | BSD-3-Clause | https://github.com/rasterio/affine |
 | annotated-types | 0.8.0 | MIT | https://github.com/annotated-types/annotated-types |
 | attrs | 26.1.0 | MIT | https://www.attrs.org |
-| certifi | 2026.7.22 | MPL-2.0 | https://github.com/certifi/python-certifi |
+| certifi | 2026.10.19 | MPL-2.0 | https://github.com/certifi/python-certifi |
 | charset-normalizer | 3.5.2 | MIT | https://github.com/jawah/charset_normalizer |
 | click | 8.5.0 | BSD-3-Clause | https://github.com/pallets/click/ |
 | cloudpickle | 3.1.2 | BSD | https://github.com/cloudpipe/cloudpickle |

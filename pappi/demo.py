@@ -6,7 +6,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from pappi.core.pipeline import N_FOLDS, Dataset, xgb_fitter
+from pappi.core.pipeline import Dataset
 from pappi.core.ppi import macro_f1
 
 CROPS = np.array(["maize", "beans", "sorghum"])
@@ -34,12 +34,11 @@ def synthetic_campaign(n_labeled: int = 1000, n_deploy: int = 5000, seed: int = 
     return frame
 
 
-## Macro-F1 on the hidden deployment labels of the model audit() deploys: the same
-## trainer, fit on the same rows (all labels but a fold-sized share).
-def true_score(frame: pd.DataFrame, light: bool = False, seed: int = 0) -> float:
+## Macro-F1 on the hidden deployment labels of the models audit() scores
+## (report.models[seed]), pooled: the score of their mean TP/FP/FN rates.
+def true_score(frame: pd.DataFrame, models: list) -> float:
     data = Dataset.from_frame(frame)
-    lab, n_l = data.labeled, int(data.labeled.sum())
-    idx = np.random.default_rng(seed).choice(n_l, n_l - n_l // N_FOLDS, replace=False)
-    model = xgb_fitter(light)(data.X[lab][idx], data.y[idx], seed)
+    lab = data.labeled
     y_u = np.searchsorted(data.classes, frame.loc[~lab, "true_label"].astype(str))
-    return macro_f1(y_u, model.predict_proba(data.X[~lab]).argmax(1), len(data.classes))
+    y_hat = np.concatenate([m.predict_proba(data.X[~lab]).argmax(1) for m in models])
+    return macro_f1(np.tile(y_u, len(models)), y_hat, len(data.classes))

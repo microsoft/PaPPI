@@ -10,4 +10,5 @@ frame = synthetic_campaign()
 report = audit(frame, protocols=[Protocol("roadside", ["dist_to_road"])], light=True,
                progress=True)
 Console().print(report)
-print(f"true deployment macro-F1: {true_score(frame, light=True):.2f} (from the hidden labels)")
+print(f"true deployment macro-F1: {true_score(frame, report.models[0]):.2f} "
+      "(from the hidden labels)")

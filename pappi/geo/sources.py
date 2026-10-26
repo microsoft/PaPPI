@@ -68,7 +68,13 @@ class LocalVector:
 
     def fetch(self, bbox, cache: Path):
         import geopandas as gpd
+        import pyogrio
+        from pyproj import Transformer
 
+        ## pyogrio reads a bbox tuple in the layer's CRS, so move the degree box there first.
+        crs = pyogrio.read_info(self.path)["crs"]
+        if crs:
+            bbox = Transformer.from_crs("EPSG:4326", crs, always_xy=True).transform_bounds(*bbox)
         return gpd.read_file(self.path, bbox=bbox).to_crs("EPSG:4326").geometry
 
 
@@ -202,6 +208,10 @@ class HttpFile(io.RawIOBase):
                     r = self.s.get(self.url, headers={"Range": f"bytes={lo}-{hi}"},
                                    timeout=300)
                     r.raise_for_status()
+                    ## A server or proxy that ignores Range answers 200 with the whole file.
+                    if r.status_code != 206 or len(r.content) != hi - lo + 1:
+                        raise OSError(f"range {lo}-{hi}: HTTP {r.status_code}, "
+                                      f"{len(r.content)} bytes")
                     out += r.content
                     break
                 except Exception as e:  # noqa: BLE001
