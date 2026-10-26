@@ -156,9 +156,9 @@ def xgb_fitter(light: bool = False, **params) -> FitFn:
     def fit(X, y, seed):
         from xgboost import XGBClassifier
 
-        return XGBClassifier(n_estimators=LIGHT_ROUNDS if light else 200, max_depth=6,
-                             learning_rate=0.15, tree_method="hist", verbosity=0,
-                             random_state=seed, **params).fit(X, y)
+        kw = dict(n_estimators=LIGHT_ROUNDS if light else 200, max_depth=6, learning_rate=0.15,
+                  tree_method="hist", verbosity=0, random_state=seed)
+        return XGBClassifier(**(kw | params)).fit(X, y)
 
     return fit
 
@@ -207,8 +207,9 @@ class Report:
     data: Dataset
     notes: list[str] = field(default_factory=list)
     metric: str = "macro-F1"
-    ## Per seed, the model behind the PPI rows; call it on data.X (the rows audit kept).
-    deployed: dict[int, Fitted] = field(default_factory=dict)
+    ## Per seed, the correction split's fold models, whose mean score the PPI rows estimate
+    ## (with `model`, just that model); call them on data.X (the rows audit kept).
+    models: dict[int, list[Fitted]] = field(default_factory=dict)
 
     @property
     def n_labels(self) -> int:
@@ -284,22 +285,30 @@ def _as_model(m, data: Dataset) -> Fitted:
 
 ## predict_proba as an array with one column per class 0..k-1.
 def _proba(m, X: np.ndarray, k: int) -> np.ndarray:
-    p = np.asarray(m.predict_proba(X))
+    p = np.asarray(m.predict_proba(X), dtype=np.float64)
     if p.ndim != 2 or p.shape[1] != k:
         raise ValueError(f"predict_proba must return (n, {k}) columns for classes 0..{k - 1}, "
                          f"got {p.shape}")
+    if not (np.isfinite(p).all() and (p >= 0).all() and np.allclose(p.sum(1), 1, atol=1e-3)):
+        raise ValueError("predict_proba must return finite values in [0, 1] that sum to 1 "
+                         "in each row")
     return p
 
 
 ## Held-out probabilities: for each fold, fit on the other rows and predict this one.
-def _oof(fit, X, y, ids: np.ndarray, seed: int, k: int) -> np.ndarray:
-    out = None
+## With x_u, also each fold model's probabilities on x_u (folds, len(x_u), k) and the models.
+def _oof(fit, X, y, ids: np.ndarray, seed: int, k: int, x_u=None):
+    out, p_u, models = None, [], []
     for f in np.unique(ids):
         te = ids == f
-        p = _proba(fit(X[~te], y[~te], seed), X[te], k)
+        m = fit(X[~te], y[~te], seed)
+        p = _proba(m, X[te], k)
         out = np.zeros((len(X), k), dtype=p.dtype) if out is None else out
         out[te] = p
-    return out
+        if x_u is not None:
+            p_u.append(_proba(m, x_u, k))
+            models.append(m)
+    return out if x_u is None else (out, np.stack(p_u), models)
 
 
 ## in_domain: Splits scored on the labels (the CV rows). correction_split: held-out
@@ -309,7 +318,7 @@ def _oof(fit, X, y, ids: np.ndarray, seed: int, k: int) -> np.ndarray:
 ## f(frame) -> array, adds a "known inclusion" row. interval: None (delta) or Bootstrap.
 ## model: a trained model audited as is, in place of fit_model; the labeled rows must be
 ## a test set it never saw, or the estimate comes out optimistic. folds: k of the default
-## (kfold) splits; the refit deployed model trains on (k-1)/k of L. n_jobs: processes
+## (kfold) splits; each fold model trains on (k-1)/k of L. n_jobs: processes
 ## for the seeds, or for the bootstrap with one seed; the same results.
 def audit(
     data: Dataset | pd.DataFrame | str | Path,
@@ -340,7 +349,7 @@ def audit(
         given = _as_model(model, data)
 
         ## The given model becomes a trainer that ignores its data: one fold scores all of
-        ## L, and the deployed model is the given one, never retrained.
+        ## L and U with the given model, never retrained.
         def fit_model(X, y, seed):
             return given
 
@@ -465,8 +474,8 @@ def _fit(data, z_cols, bar, fit_model, fit_propensity, metric, seeds, in_domain,
         g = _name(propensity.groups)
         pg = None if g is None else pd.factorize(np.r_[_groups(f, g, lab), _groups(f, g, ~lab)])[0]
     kf = partial(kfold, k=folds)
-    ## Propensity folds: the user's assign when its split has groups, else kfold.
-    p_assign = (propensity.assign if propensity is not None and pg is not None else None) or kf
+    ## Propensity folds: the user's assign when given, else kfold.
+    p_assign = (propensity.assign if propensity is not None else None) or kf
     w_pi = None
     if inclusion is not None:
         pi = np.asarray(f[inclusion] if isinstance(inclusion, str) else inclusion(f),
@@ -481,7 +490,7 @@ def _fit(data, z_cols, bar, fit_model, fit_propensity, metric, seeds, in_domain,
         notes.append(f"bootstrap {interval.n}")
 
     splits = in_domain + ([] if correction in in_domain else [correction])
-    per_seed = len(splits) + 1 + len(sets)
+    per_seed = len(splits) + len(sets)
     task = bar.add_task("fits", total=len(seeds) * per_seed)
 
     ## Computed once here, so workers get each split's groups, not the whole frame.
@@ -491,24 +500,23 @@ def _fit(data, z_cols, bar, fit_model, fit_propensity, metric, seeds, in_domain,
         rows = []
         for sp, g in zip(splits, groups):
             bar.update(task, description=f"seed {seed}: {sp.name or 'correction'}")
-            p = _oof(fit_model, x_l, y, (sp.assign or kf)(n_l, g, seed), seed, k)
+            ids = (sp.assign or kf)(n_l, g, seed)
+            ## Cross-fit: each correction fold model also predicts U, so the imputation and
+            ## the correction describe the same models.
+            if sp is correction:
+                p, p_u, models = _oof(fit_model, x_l, y, ids, seed, k, x_u)
+                p_l = p
+            else:
+                p = _oof(fit_model, x_l, y, ids, seed, k)
             if sp in in_domain:
                 rows.append(dict(seed=seed, key=sp.name, estimate=sp.name,
                                  score=metric.score(y, p.argmax(1), k), n_eff=float(n_l)))
-            if sp is correction:
-                p_l = p
             bar.advance(task)
-        ## The deployed model sees a fold-sized share of L so the fold models' errors
-        ## stand in for its own, as in the paper.
-        idx = np.random.default_rng(seed).choice(n_l, n_l - n_l // folds, replace=False)
-        bar.update(task, description=f"seed {seed}: deployed model")
-        model = fit_model(x_l[idx], y[idx], seed)
-        p_u = _proba(model, x_u, k).astype(np.float64)
-        bar.advance(task)
-        yl_hat, yu_hat = p_l.argmax(1), p_u.argmax(1)
+        yl_hat, yu_hat = p_l.argmax(1), p_u.argmax(2)
 
         def est(w, il=slice(None), iu=slice(None)):
-            return ppi_estimate(metric, p_l[il], yl_hat[il], y[il], w, p_u[iu], yu_hat[iu], k)
+            return ppi_estimate(metric, p_l[il], yl_hat[il], y[il], w, p_u[:, iu], yu_hat[:, iu],
+                                k)
 
         rng = np.random.default_rng(seed + 7)
         for key, F in sets.items():
@@ -516,7 +524,7 @@ def _fit(data, z_cols, bar, fit_model, fit_propensity, metric, seeds, in_domain,
             q = _oof(fit_propensity, F, s, p_assign(len(F), pg, seed), seed, 2)[:, 1]
             r = est(inverse_odds_weights(q[:n_l]))
             row = dict(seed=seed, key=key, estimate=ARMS[key], score=r["point"], ci_lo=r["ci_lo"],
-                       ci_hi=r["ci_hi"], sigma=r["sigma"], n_eff=r["n_eff"],
+                       ci_hi=r["ci_hi"], sigma=r["sigma"], n_eff=r["n_eff"], clipped=r["clipped"],
                        auc=float(roc_auc_score(s, q)), q_l_median=float(np.median(q[:n_l])),
                        q_u_median=float(np.median(q[n_l:])),
                        q_clip_share_l=float(np.mean(q[:n_l] <= _PI_CLIP_MIN)))
@@ -536,14 +544,15 @@ def _fit(data, z_cols, bar, fit_model, fit_propensity, metric, seeds, in_domain,
         if w_pi is not None:
             r = est(w_pi)
             row = dict(seed=seed, key="pi", estimate=ARMS["pi"], score=r["point"],
-                       ci_lo=r["ci_lo"], ci_hi=r["ci_hi"], sigma=r["sigma"], n_eff=r["n_eff"])
+                       ci_lo=r["ci_lo"], ci_hi=r["ci_hi"], sigma=r["sigma"], n_eff=r["n_eff"],
+                       clipped=r["clipped"])
             if interval is not None and interval.covers("pi", seed):
                 ## Serial: a known-weights replicate is too cheap to ship to a process.
                 row["boot_lo"], row["boot_hi"] = _bootstrap(
                     interval.n, 1, clusters, n_u, rng,
                     lambda il, iu, sd: est(w_pi[il], il, iu)["point"], draw_seed=False)
             rows.append(row)
-        return rows, model
+        return rows, models
 
     ## One level of processes: seeds when there are several, else bootstrap replicates.
     ## Seeds and replicates draw in a fixed order, so n_jobs never changes results.
@@ -556,8 +565,10 @@ def _fit(data, z_cols, bar, fit_model, fit_propensity, metric, seeds, in_domain,
         if outer != 1:
             bar.advance(task, per_seed)
     rows = [row for seed_rows, _ in out for row in seed_rows]
-    deployed = dict(zip(seeds, (m for _, m in out)))
+    models = dict(zip(seeds, (m for _, m in out)))
 
+    if any(row.get("clipped") for row in rows):
+        notes.append("a corrected rate fell below 0; use --bootstrap for the interval")
     if len(seeds) > 1:
         notes.append(f"mean of {len(seeds)} seeds")
-    return Report(pd.DataFrame(rows), data, notes, metric.name, deployed)
+    return Report(pd.DataFrame(rows), data, notes, metric.name, models)

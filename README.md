@@ -20,7 +20,8 @@ OpenStreetMap and Copernicus DEM fetchers. For the exact versions this release w
 
 ```console
 $ git clone https://github.com/microsoft/PaPPI && cd PaPPI
-$ uv sync --extra geo
+$ pip install -r requirements.txt
+$ pip install --no-deps .
 ```
 
 ## Run
@@ -95,8 +96,8 @@ report = audit(Dataset.from_files("test.parquet", "deploy.parquet"), model=my_mo
 - `metric`: `MacroF1()` (default), `Accuracy()`, or any object with `observed`, `expected`, `value`, `grad`, `score`.
 - `fit_model`, `fit_propensity`: functions `fit(X, y, seed)` returning an object with `predict_proba(X)` (columns = classes 0..K-1); called once per fold, so the tool never needs your model class. Default: XGBoost with the paper's settings.
 - `model`: a trained model audited as is, instead of `fit_model`: an object with `predict_proba(X)` or a function `f(X) -> probabilities` (CLI `--model pkg.module:obj`, or a `.pkl`/`.joblib`; loading one runs its code, so use trusted files only). The labeled rows must be a test set it never saw, or the estimate comes out optimistic; the tool cannot check this. The model is never retrained: one "test set (as reported)" row replaces the CV rows. Columns of `predict_proba` must follow the sorted labels (checked when the model has `classes_`); a model fitted on named columns gets them by name.
-- `report.deployed[seed]`: the model behind the PPI rows: your object (wrapped if it is a function or was fitted on named columns), or the refit model by default. Call it on `report.data.X`; `report.data` holds only the rows the audit kept.
-- `folds=5`: k of every default (`kfold`) split; the refit deployed model trains on (k-1)/k of the labels, like a fold model. A custom `assign` keeps its own k.
+- `report.models[seed]`: the models behind the PPI rows: the correction split's fold models by default, or `[your object]` with `model` (wrapped if it is a function or was fitted on named columns). Call them on `report.data.X`; `report.data` holds only the rows the audit kept.
+- `folds=5`: k of every default (`kfold`) split; each fold model trains on (k-1)/k of the labels. A custom `assign` keeps its own k.
 - `n_jobs`: parallel processes, for the seeds when there are several, else for the bootstrap replicates; the same results for any value.
 - `light=True` caps deployment at a random 2,000 rows (the caption says how many of how many) and uses 50 boosting rounds; `progress=True` shows a progress bar (on in the CLI).
 
@@ -147,12 +148,16 @@ propensity `auc` (near 1: labeled and deployment rows barely overlap), medians, 
   the clip and `n_eff` falls.
 - Deployment rows are a uniform sample of the population the estimate is about.
 - With `model`, the labeled rows were not used to train it.
+- With `fit_model`, the PPI rows estimate the mean deployment score of the correction split's
+  fold models, each trained on (k-1)/k of the labels: every fold model predicts the deployment
+  rows and is corrected on the labels it did not see. A model refit on all labels usually
+  scores a little higher.
 - Labels are classes; the metrics are macro-F1 and accuracy.
 
 ## Tests
 
 ```console
-$ uv run pytest
+$ pip install pytest && pytest
 ```
 
 ## Data and licenses
@@ -162,6 +167,12 @@ PaPPI downloads OpenStreetMap (© OpenStreetMap contributors, ODbL) and Copernic
 (© DLR e.V., © Airbus Defence and Space GmbH, provided under COPERNICUS by the EU and ESA)
 on your machine. Code is MIT-licensed ([LICENSE](LICENSE)); third-party packages and data
 attributions are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+Network use: with `[geo]`, PaPPI sends the bounding box of your points (never labels, features
+or the points themselves) to the Planetary Computer STAC API to find DEM tiles, then reads
+those tiles and the Geofabrik extracts that cover the box. Downloads are cached under
+`~/.cache/pappi`. To make no requests, put the Z columns in your table or use `LocalVector` /
+`LocalRaster`.
 
 ## Citation
 

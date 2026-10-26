@@ -42,8 +42,8 @@ def main(argv: list[str] | None = None) -> int:
                    "(or f(X) -> probabilities), audited as is; labeled rows must be a test set "
                    "it never saw")
     a.add_argument("--fit-propensity", help="pkg.module:fit for the labeled-vs-deployment model")
-    a.add_argument("--folds", type=int, help="k of the default fold splits (default 5); the refit "
-                   "deployed model trains on (k-1)/k of the labels")
+    a.add_argument("--folds", type=int, help="k of the default fold splits (default 5); each fold "
+                   "model trains on (k-1)/k of the labels")
     a.add_argument("--metric", choices=sorted(METRICS))
     a.add_argument("--inclusion", help="column of known inclusion probabilities")
     a.add_argument("--bootstrap", type=int, help="bootstrap replicates for the intervals")
@@ -85,8 +85,14 @@ def main(argv: list[str] | None = None) -> int:
                               cfg.pop("features", args.features))
     import pappi.geo as geo
 
-    auto = geo.is_geo(data) and not {"protocols", "in_domain"} & cfg.keys()
-    report = audit(data, progress=True, **({**geo.defaults(data), **cfg} if auto else cfg))
+    ## Geo defaults fill only the keys the user left out.
+    auto = geo.is_geo(data)
+    if auto:
+        d = geo.defaults(data)
+        if "in_domain" in cfg:  ## the default correction split is one of the default CV splits
+            d.pop("correction_split")
+        cfg = {**d, **cfg}
+    report = audit(data, progress=True, **cfg)
     if auto:
         report.notes.append("geo defaults")
     Console().print(report)

@@ -117,7 +117,8 @@ class Accuracy:
 
 
 ## Eq. (2) of the paper: imputation over U + Hájek-weighted
-## residual over L, delta-method 95% CI.
+## residual over L, delta-method 95% CI. Cross-fit: p_hat_u (models, n_u, k) and
+## y_hat_u (models, n_u) hold each fold model's predictions; U imputes their mean row.
 def ppi_estimate(
     metric: Metric,
     p_hat_l: np.ndarray,
@@ -132,7 +133,8 @@ def ppi_estimate(
     g_l = metric.expected(p_hat_l, y_hat_l, K)
     h_l = metric.observed(y_l, y_hat_l, K)
     r_l = h_l - g_l
-    g_u = metric.expected(p_hat_u, y_hat_u, K)
+    g_u = (metric.expected(p_hat_u, y_hat_u, K) if p_hat_u.ndim == 2 else
+           np.mean([metric.expected(p, yh, K) for p, yh in zip(p_hat_u, y_hat_u)], axis=0))
 
     N = len(g_u)
     mu_imp = g_u.mean(axis=0)
@@ -162,6 +164,7 @@ def ppi_estimate(
         "rectifier": mu_res,
         "imputation": mu_imp,
         "n_eff": float(n_eff),
+        "clipped": bool((mu_total < 0).any()),
     }
 
 

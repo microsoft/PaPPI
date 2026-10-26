@@ -2,7 +2,7 @@
 
 ## Development Lead
 
-* Kemunto Ochwang'i <evatom86@gmail.com>
+* Kemunto Ochwang'i
 * Akram Zaytar <akramzaytar@microsoft.com>
 
 ## Contributors
