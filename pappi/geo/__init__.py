@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
-from pappi.core.pipeline import Dataset, Protocol, Split, register_protocol
+from pappi.core.pipeline import Dataset, Protocol, register_protocol
 from pappi.geo.covariates import (
     DistanceTo,
     DistToBuilding,
@@ -10,7 +10,6 @@ from pappi.geo.covariates import (
     SampleRaster,
     Slope,
     SlopeOf,
-    SpatialBlocks,
     point_covariate,
 )
 from pappi.geo.sources import (
@@ -40,18 +39,13 @@ def is_geo(data: Dataset) -> bool:
     return {"lat", "lon"} <= set(data.frame.columns)
 
 
-## audit() defaults for point data, as in the paper's Kenya case study: 0.045 deg
-## (~5 km) blocks for the blocked CV row, the correction and the propensity folds.
+## audit() defaults for point data: the four protocols whose Z can be fetched.
 def defaults(data: Dataset) -> dict:
-    blocks = SpatialBlocks(deg=0.045)
-    in_domain = [Split("random row split (CV)"), Split("5 km blocks (CV)", groups=blocks)]
-    return {"protocols": DEFAULT_PROTOCOLS, "in_domain": in_domain,
-            "correction_split": in_domain[1],
-            "propensity_split": Split("propensity", groups=blocks)}
+    return {"protocols": DEFAULT_PROTOCOLS}
 
 
 __all__ = [
     "CACHE_DIR", "DEFAULT_PROTOCOLS", "CopernicusDEM", "DistToBuilding", "DistToRoad",
     "DistanceTo", "Elevation", "GeofabrikLayer", "LocalRaster", "LocalVector", "point_covariate",
-    "SampleRaster", "Slope", "SlopeOf", "SpatialBlocks", "cached", "defaults", "is_geo",
+    "SampleRaster", "Slope", "SlopeOf", "cached", "defaults", "is_geo",
 ]

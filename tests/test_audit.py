@@ -21,19 +21,19 @@ def test_audit_beats_random_cv():
         frame = synthetic_campaign(seed=seed)
         r = audit(frame, protocols=ROADSIDE, in_domain=[Split("cv")], light=True)
         s = r.frame.set_index("key").score
-        truth = true_score(frame, r.models[0])
+        truth = true_score(frame, r.models)
         errs.append((s["cv"] - truth, abs(s["x"] - truth)))
     cv, ppi = np.mean(errs, axis=0)
     assert cv > 0.05
     assert ppi < 0.7 * cv
 
 
-def test_cli_writes_per_seed_rows(tmp_path):
+def test_cli_writes_rows(tmp_path):
     csv, out = tmp_path / "campaign.csv", tmp_path / "rows.csv"
     synthetic_campaign(n_labeled=300, n_deploy=600).to_csv(csv, index=False)
-    assert main(["audit", str(csv), "--light", "--seeds", "2", "--out", str(out)]) == 0
+    assert main(["audit", str(csv), "--light", "--out", str(out)]) == 0
     rows = pd.read_csv(out)
-    assert len(rows) == 4 and "x" in set(rows.key)
+    assert list(rows.key) == ["random row split (CV)", "x"]
 
 
 ## A trainer whose output swings with its training rows: it predicts its first label. The
@@ -53,18 +53,18 @@ def test_crossfit_covers_the_models_it_scores():
         def predict_proba(self, X):
             return np.eye(2)[np.full(len(X), self.c)]
 
-    r = audit(frame, fit_model=lambda X, y, seed: First(int(y[0])), metric=Accuracy(),
-              seeds=[1], inclusion=lambda f: np.ones(len(f)))
+    r = audit(frame, fit_model=lambda X, y: First(int(y[0])), metric=Accuracy(),
+              inclusion=lambda f: np.ones(len(f)))
     row = r.frame.set_index("key").loc["pi"]
     truth = np.mean([np.mean(m.predict_proba(np.zeros((1000, 1))).argmax(1) == y_u)
-                     for m in r.models[1]])
+                     for m in r.models])
     assert row.ci_lo <= truth <= row.ci_hi
 
 
 def test_custom_propensity_assign_without_groups_is_used():
     calls = []
 
-    def assign(n, groups, seed):
+    def assign(n, groups):
         calls.append(n)
         return np.arange(n) % 5
 
@@ -79,16 +79,16 @@ def test_bad_probabilities_raise():
         audit(synthetic_campaign(n_labeled=200, n_deploy=400), model=logits, light=True)
 
 
-## Choosing a protocol on lat/lon data keeps the 5 km splits; dist_to_road is in the table,
-## so nothing is downloaded. Parquet input needs pyarrow.
-def test_cli_protocols_keep_geo_splits(tmp_path):
+## A protocol chosen on lat/lon data replaces the geo default ones; dist_to_road is in the
+## table, so nothing is downloaded. Parquet input needs pyarrow.
+def test_cli_protocols_override_geo_defaults(tmp_path):
     frame = synthetic_campaign(n_labeled=300, n_deploy=600)
     rng = np.random.default_rng(0)
     frame["lat"], frame["lon"] = rng.uniform(0, 0.3, len(frame)), rng.uniform(36, 36.3, len(frame))
     data, out = tmp_path / "campaign.parquet", tmp_path / "rows.csv"
     frame.to_parquet(data)
     assert main(["audit", str(data), "--protocols", "roadside", "--light", "--out", str(out)]) == 0
-    assert "5 km blocks (CV)" in set(pd.read_csv(out).estimate)
+    assert list(pd.read_csv(out).key) == ["random row split (CV)", "x", "z", "xz"]
 
 
 def test_local_vector_in_projected_crs(tmp_path):

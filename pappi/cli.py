@@ -37,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--label", default="label")
     a.add_argument("--features", default="x_", help="column prefix")
     a.add_argument("--protocols", nargs="*")
-    a.add_argument("--fit-model", help="pkg.module:fit, fit(X, y, seed) -> predict_proba")
+    a.add_argument("--fit-model", help="pkg.module:fit, fit(X, y) -> predict_proba")
     a.add_argument("--model", help="pkg.module:obj or a trusted .pkl/.joblib with predict_proba "
                    "(or f(X) -> probabilities), audited as is; labeled rows must be a test set "
                    "it never saw")
@@ -47,11 +47,9 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--metric", choices=sorted(METRICS))
     a.add_argument("--inclusion", help="column of known inclusion probabilities")
     a.add_argument("--bootstrap", type=int, help="bootstrap replicates for the intervals")
-    a.add_argument("--seeds", type=int)
-    a.add_argument("--jobs", type=int, help="parallel processes: seeds, or the bootstrap with "
-                   "one seed (same results)")
+    a.add_argument("--jobs", type=int, help="parallel processes for the bootstrap (same results)")
     a.add_argument("--light", action="store_true", default=None)
-    a.add_argument("--out", help="per-seed rows as CSV")
+    a.add_argument("--out", help="report rows as CSV")
     args = ap.parse_args(argv)
 
     cfg = {}
@@ -60,8 +58,8 @@ def main(argv: list[str] | None = None) -> int:
 
         with open(args.config) as f:
             cfg = yaml.safe_load(f) or {}
-    keys = ("protocols", "fit_model", "model", "fit_propensity", "folds", "metric", "seeds",
-            "jobs", "light", "inclusion", "bootstrap")
+    keys = ("protocols", "fit_model", "model", "fit_propensity", "folds", "metric", "jobs",
+            "light", "inclusion", "bootstrap")
     cfg.update({k: v for k, v in vars(args).items() if k in keys and v is not None})
     for key in ("fit_model", "model", "fit_propensity"):
         if key in cfg:
@@ -85,14 +83,9 @@ def main(argv: list[str] | None = None) -> int:
                               cfg.pop("features", args.features))
     import pappi.geo as geo
 
-    ## Geo defaults fill only the keys the user left out.
-    auto = geo.is_geo(data)
-    if auto:
-        d = geo.defaults(data)
-        if "in_domain" in cfg:  ## the default correction split is one of the default CV splits
-            d.pop("correction_split")
-        cfg = {**d, **cfg}
-    report = audit(data, progress=True, **cfg)
+    ## Geo defaults apply only when the user chose no protocols.
+    auto = geo.is_geo(data) and "protocols" not in cfg
+    report = audit(data, progress=True, **({**geo.defaults(data), **cfg} if auto else cfg))
     if auto:
         report.notes.append("geo defaults")
     Console().print(report)

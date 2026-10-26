@@ -35,7 +35,7 @@ def synthetic_campaign(n_labeled: int = 1000, n_deploy: int = 5000, seed: int = 
 
 
 ## Macro-F1 on the hidden deployment labels of the models audit() scores
-## (report.models[seed]), pooled: the score of their mean TP/FP/FN rates.
+## (report.models), pooled: the score of their mean TP/FP/FN rates.
 def true_score(frame: pd.DataFrame, models: list) -> float:
     data = Dataset.from_frame(frame)
     lab = data.labeled

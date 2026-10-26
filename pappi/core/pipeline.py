@@ -35,14 +35,14 @@ class Fitted(Contract):
     def predict_proba(self, X) -> np.ndarray: ...
 
 
-## fit(X, y, seed) -> Fitted; predict_proba columns follow the classes 0..K-1 of y.
-FitFn = Callable[[np.ndarray, np.ndarray, int], Fitted]
+## fit(X, y) -> Fitted; predict_proba columns follow the classes 0..K-1 of y.
+FitFn = Callable[[np.ndarray, np.ndarray], Fitted]
 
 
 ## A Z covariate or a group spec: a column name, or (name, fn) with fn(frame) -> array.
 Spec = str | tuple[str, Callable[[pd.DataFrame], np.ndarray]]
-## assign(n_rows, groups, seed) -> fold id per row; rows sharing a group share a fold.
-FoldFn = Callable[[int, np.ndarray | None, int], np.ndarray]
+## assign(n_rows, groups) -> fold id per row; rows sharing a group share a fold.
+FoldFn = Callable[[int, np.ndarray | None], np.ndarray]
 
 
 def read_table(path, **kw) -> pd.DataFrame:
@@ -153,11 +153,11 @@ def materialize(frame: pd.DataFrame, specs: list[Spec]) -> tuple[pd.DataFrame, l
 
 ## XGBoost trainer with the paper's settings (200 rounds, depth 6, eta 0.15).
 def xgb_fitter(light: bool = False, **params) -> FitFn:
-    def fit(X, y, seed):
+    def fit(X, y):
         from xgboost import XGBClassifier
 
         kw = dict(n_estimators=LIGHT_ROUNDS if light else 200, max_depth=6, learning_rate=0.15,
-                  tree_method="hist", verbosity=0, random_state=seed)
+                  tree_method="hist", verbosity=0, random_state=0)
         return XGBClassifier(**(kw | params)).fit(X, y)
 
     return fit
@@ -165,8 +165,8 @@ def xgb_fitter(light: bool = False, **params) -> FitFn:
 
 ## Default fold assignment (the paper's): a random fold per row, or, with groups, whole
 ## groups to folds by a random permutation mod k. e.g. groups [a, a, b] -> folds [2, 2, 0].
-def kfold(n: int, groups: np.ndarray | None, seed: int, k: int = N_FOLDS) -> np.ndarray:
-    return assign_folds(n, groups, np.random.default_rng(seed), k)
+def kfold(n: int, groups: np.ndarray | None, k: int = N_FOLDS) -> np.ndarray:
+    return assign_folds(n, groups, np.random.default_rng(0), k)
 
 
 def assign_folds(n: int, groups: np.ndarray | None, rng: np.random.Generator,
@@ -188,17 +188,15 @@ class Split:
 
 ## Percentile interval from `n` replicates: labeled rows resampled by `groups` (default:
 ## the correction split's groups, else rows), deployment rows by row; propensity refit.
-## `arms` ("x", "z", "xz", "pi") and `seeds` limit it.
+## `arms` ("x", "z", "xz", "pi") limits it.
 @dataclass(eq=False)
 class Bootstrap:
     n: int = 200
     groups: object = None
     arms: tuple[str, ...] | None = None
-    seeds: list[int] | None = None
 
-    def covers(self, key: str, seed: int) -> bool:
-        return ((self.arms is None or key in self.arms)
-                and (self.seeds is None or seed in self.seeds))
+    def covers(self, key: str) -> bool:
+        return self.arms is None or key in self.arms
 
 
 @dataclass
@@ -207,9 +205,9 @@ class Report:
     data: Dataset
     notes: list[str] = field(default_factory=list)
     metric: str = "macro-F1"
-    ## Per seed, the correction split's fold models, whose mean score the PPI rows estimate
+    ## The correction split's fold models, whose pooled score the PPI rows estimate
     ## (with `model`, just that model); call them on data.X (the rows audit kept).
-    models: dict[int, list[Fitted]] = field(default_factory=dict)
+    models: list[Fitted] = field(default_factory=list)
 
     @property
     def n_labels(self) -> int:
@@ -219,14 +217,13 @@ class Report:
     def n_deploy(self) -> int:
         return len(self.data) - self.n_labels
 
-    ## Mean over seeds; the shown interval is the bootstrap one only when every
-    ## seed has one, so it never describes a different set of seeds than the score.
+    ## One row per estimate; the bootstrap interval replaces the delta one where it exists.
     def summary(self) -> pd.DataFrame:
         cols = [c for c in ("score", "ci_lo", "ci_hi", "boot_lo", "boot_hi", "n_eff", "auc")
                 if c in self.frame.columns]
-        s = self.frame.groupby("estimate", sort=False)[cols].mean()
+        s = self.frame.set_index("estimate")[cols].copy()
         if "boot_lo" in s.columns:
-            has = self.frame.boot_lo.notna().groupby(self.frame.estimate, sort=False).all()
+            has = s.boot_lo.notna()
             s.loc[has, "ci_lo"], s.loc[has, "ci_hi"] = s.boot_lo[has], s.boot_hi[has]
         return s
 
@@ -297,11 +294,11 @@ def _proba(m, X: np.ndarray, k: int) -> np.ndarray:
 
 ## Held-out probabilities: for each fold, fit on the other rows and predict this one.
 ## With x_u, also each fold model's probabilities on x_u (folds, len(x_u), k) and the models.
-def _oof(fit, X, y, ids: np.ndarray, seed: int, k: int, x_u=None):
+def _oof(fit, X, y, ids: np.ndarray, k: int, x_u=None):
     out, p_u, models = None, [], []
     for f in np.unique(ids):
         te = ids == f
-        m = fit(X[~te], y[~te], seed)
+        m = fit(X[~te], y[~te])
         p = _proba(m, X[te], k)
         out = np.zeros((len(X), k), dtype=p.dtype) if out is None else out
         out[te] = p
@@ -318,8 +315,8 @@ def _oof(fit, X, y, ids: np.ndarray, seed: int, k: int, x_u=None):
 ## f(frame) -> array, adds a "known inclusion" row. interval: None (delta) or Bootstrap.
 ## model: a trained model audited as is, in place of fit_model; the labeled rows must be
 ## a test set it never saw, or the estimate comes out optimistic. folds: k of the default
-## (kfold) splits; each fold model trains on (k-1)/k of L. n_jobs: processes
-## for the seeds, or for the bootstrap with one seed; the same results.
+## (kfold) splits; each fold model trains on (k-1)/k of L. n_jobs: processes for the
+## bootstrap replicates; the same results for any value.
 def audit(
     data: Dataset | pd.DataFrame | str | Path,
     fit_model: FitFn | None = None,
@@ -332,7 +329,6 @@ def audit(
     interval: Bootstrap | None = None,
     metric: Metric | None = None,
     fit_propensity: FitFn | None = None,
-    seeds: int | list[int] = 1,
     light: bool = False,
     folds: int = N_FOLDS,
     n_jobs: int = 1,
@@ -350,17 +346,16 @@ def audit(
 
         ## The given model becomes a trainer that ignores its data: one fold scores all of
         ## L and U with the given model, never retrained.
-        def fit_model(X, y, seed):
+        def fit_model(X, y):
             return given
 
         correction_split = Split("test set (as reported)", correction_split.groups,
-                                 lambda n, g, s: np.zeros(n, dtype=int))
+                                 lambda n, g: np.zeros(n, dtype=int))
         in_domain = [correction_split]
     cfg = dict(fit_model=xgb_fitter(light) if fit_model is None else fit_model,
                fit_propensity=(xgb_fitter(light, subsample=0.8, colsample_bytree=0.8)
                                if fit_propensity is None else fit_propensity),
                metric=MacroF1() if metric is None else metric,
-               seeds=list(range(seeds)) if isinstance(seeds, int) else list(seeds),
                in_domain=in_domain, correction=correction_split, propensity=propensity_split,
                inclusion=inclusion, interval=interval, light=light,
                folds=folds, n_jobs=n_jobs)
@@ -388,17 +383,9 @@ def audit(
     return report
 
 
-## Column name of a Spec: "site" -> "site", ("block_5km", fn) -> "block_5km".
+## Column name of a Spec: "site" -> "site", ("dist_to_road", fn) -> "dist_to_road".
 def _name(spec: Spec | None) -> str | None:
     return None if spec is None else spec if isinstance(spec, str) else spec[0]
-
-
-## Stand-in progress bar for worker processes, which cannot share the real one.
-class _Quiet:
-    def update(self, *args, **kwargs):
-        pass
-
-    advance = update
 
 
 def _bar(enabled: bool):
@@ -420,11 +407,11 @@ def _groups(frame, col, rows):
     return None if col is None else frame.loc[rows, col].to_numpy()
 
 
-## Percentile interval of fn(il, iu, sd) over resampled label clusters and deployment rows.
+## Percentile interval of fn(il, iu) over resampled label clusters and deployment rows.
 ## Draws run in order here, so n_jobs never changes results. Copies keep their cluster id,
 ## so a duplicate is never scored by a model that saw its twin.
-def _bootstrap(n: int, n_jobs: int, clusters: np.ndarray, n_u: int, rng, fn,
-               draw_seed: bool = True) -> tuple[float, float]:
+def _bootstrap(n: int, n_jobs: int, clusters: np.ndarray, n_u: int, rng,
+               fn) -> tuple[float, float]:
     _, inv = np.unique(clusters, return_inverse=True)
     members = np.split(np.argsort(inv, kind="stable"), np.cumsum(np.bincount(inv))[:-1])
     m = len(members)
@@ -433,7 +420,7 @@ def _bootstrap(n: int, n_jobs: int, clusters: np.ndarray, n_u: int, rng, fn,
         for _ in range(n):
             il = np.concatenate([members[j] for j in rng.integers(0, m, m)])
             iu = rng.integers(0, n_u, n_u)
-            yield il, iu, int(rng.integers(1 << 31)) if draw_seed else None
+            yield il, iu
 
     ## joblib caps each worker at cores / n_jobs threads; n_jobs=1 runs in this process.
     reps = Parallel(n_jobs=n_jobs)(delayed(fn)(*d) for d in draws())
@@ -442,7 +429,7 @@ def _bootstrap(n: int, n_jobs: int, clusters: np.ndarray, n_u: int, rng, fn,
 
 
 ## Every number the report shows comes from here.
-def _fit(data, z_cols, bar, fit_model, fit_propensity, metric, seeds, in_domain,
+def _fit(data, z_cols, bar, fit_model, fit_propensity, metric, in_domain,
          correction, propensity, inclusion, interval, light, folds, n_jobs) -> Report:
     notes = []
     ok = (np.isfinite(data.X).all(axis=1)
@@ -490,85 +477,59 @@ def _fit(data, z_cols, bar, fit_model, fit_propensity, metric, seeds, in_domain,
         notes.append(f"bootstrap {interval.n}")
 
     splits = in_domain + ([] if correction in in_domain else [correction])
-    per_seed = len(splits) + len(sets)
-    task = bar.add_task("fits", total=len(seeds) * per_seed)
+    task = bar.add_task("fits", total=len(splits) + len(sets))
+    rows = []
+    for sp in splits:
+        bar.update(task, description=sp.name or "correction")
+        ids = (sp.assign or kf)(n_l, _groups(f, _name(sp.groups), lab))
+        ## Cross-fit: each correction fold model also predicts U, so the imputation and
+        ## the correction describe the same models.
+        if sp is correction:
+            p, p_u, models = _oof(fit_model, x_l, y, ids, k, x_u)
+            p_l = p
+        else:
+            p = _oof(fit_model, x_l, y, ids, k)
+        if sp in in_domain:
+            rows.append(dict(key=sp.name, estimate=sp.name,
+                             score=metric.score(y, p.argmax(1), k), n_eff=float(n_l)))
+        bar.advance(task)
+    yl_hat, yu_hat = p_l.argmax(1), p_u.argmax(2)
 
-    ## Computed once here, so workers get each split's groups, not the whole frame.
-    groups = [_groups(f, _name(sp.groups), lab) for sp in splits]
+    def est(w, il=slice(None), iu=slice(None)):
+        return ppi_estimate(metric, p_l[il], yl_hat[il], y[il], w, p_u[:, iu], yu_hat[:, iu], k)
 
-    def one_seed(seed, bar):
-        rows = []
-        for sp, g in zip(splits, groups):
-            bar.update(task, description=f"seed {seed}: {sp.name or 'correction'}")
-            ids = (sp.assign or kf)(n_l, g, seed)
-            ## Cross-fit: each correction fold model also predicts U, so the imputation and
-            ## the correction describe the same models.
-            if sp is correction:
-                p, p_u, models = _oof(fit_model, x_l, y, ids, seed, k, x_u)
-                p_l = p
-            else:
-                p = _oof(fit_model, x_l, y, ids, seed, k)
-            if sp in in_domain:
-                rows.append(dict(seed=seed, key=sp.name, estimate=sp.name,
-                                 score=metric.score(y, p.argmax(1), k), n_eff=float(n_l)))
-            bar.advance(task)
-        yl_hat, yu_hat = p_l.argmax(1), p_u.argmax(2)
+    rng = np.random.default_rng(7)
+    for key, F in sets.items():
+        bar.update(task, description=ARMS[key])
+        q = _oof(fit_propensity, F, s, p_assign(len(F), pg), 2)[:, 1]
+        r = est(inverse_odds_weights(q[:n_l]))
+        row = dict(key=key, estimate=ARMS[key], score=r["point"], ci_lo=r["ci_lo"],
+                   ci_hi=r["ci_hi"], sigma=r["sigma"], n_eff=r["n_eff"], clipped=r["clipped"],
+                   auc=float(roc_auc_score(s, q)), q_l_median=float(np.median(q[:n_l])),
+                   q_u_median=float(np.median(q[n_l:])),
+                   q_clip_share_l=float(np.mean(q[:n_l] <= _PI_CLIP_MIN)))
+        if interval is not None and interval.covers(key):
+            def rep(il, iu, F=F):
+                rr = np.r_[il, n_l + iu]
+                ## Copies keep their row or group id, so twins share a fold.
+                q_b = _oof(fit_propensity, F[rr], s[rr],
+                           p_assign(len(rr), rr if pg is None else pg[rr]), 2)[:, 1]
+                return est(inverse_odds_weights(q_b[:len(il)]), il, iu)["point"]
 
-        def est(w, il=slice(None), iu=slice(None)):
-            return ppi_estimate(metric, p_l[il], yl_hat[il], y[il], w, p_u[:, iu], yu_hat[:, iu],
-                                k)
+            row["boot_lo"], row["boot_hi"] = _bootstrap(interval.n, n_jobs, clusters, n_u, rng, rep)
+        rows.append(row)
+        bar.advance(task)
 
-        rng = np.random.default_rng(seed + 7)
-        for key, F in sets.items():
-            bar.update(task, description=f"seed {seed}: {ARMS[key]}")
-            q = _oof(fit_propensity, F, s, p_assign(len(F), pg, seed), seed, 2)[:, 1]
-            r = est(inverse_odds_weights(q[:n_l]))
-            row = dict(seed=seed, key=key, estimate=ARMS[key], score=r["point"], ci_lo=r["ci_lo"],
-                       ci_hi=r["ci_hi"], sigma=r["sigma"], n_eff=r["n_eff"], clipped=r["clipped"],
-                       auc=float(roc_auc_score(s, q)), q_l_median=float(np.median(q[:n_l])),
-                       q_u_median=float(np.median(q[n_l:])),
-                       q_clip_share_l=float(np.mean(q[:n_l] <= _PI_CLIP_MIN)))
-            if interval is not None and interval.covers(key, seed):
-                def rep(il, iu, sd, F=F):
-                    rr = np.r_[il, n_l + iu]
-                    ## Copies keep their row or group id, so twins share a fold.
-                    a = p_assign(len(rr), rr if pg is None else pg[rr], sd)
-                    q_b = _oof(fit_propensity, F[rr], s[rr], a, sd, 2)[:, 1]
-                    return est(inverse_odds_weights(q_b[:len(il)]), il, iu)["point"]
-
-                row["boot_lo"], row["boot_hi"] = _bootstrap(
-                    interval.n, boot_jobs, clusters, n_u, rng, rep)
-            rows.append(row)
-            bar.advance(task)
-
-        if w_pi is not None:
-            r = est(w_pi)
-            row = dict(seed=seed, key="pi", estimate=ARMS["pi"], score=r["point"],
-                       ci_lo=r["ci_lo"], ci_hi=r["ci_hi"], sigma=r["sigma"], n_eff=r["n_eff"],
-                       clipped=r["clipped"])
-            if interval is not None and interval.covers("pi", seed):
-                ## Serial: a known-weights replicate is too cheap to ship to a process.
-                row["boot_lo"], row["boot_hi"] = _bootstrap(
-                    interval.n, 1, clusters, n_u, rng,
-                    lambda il, iu, sd: est(w_pi[il], il, iu)["point"], draw_seed=False)
-            rows.append(row)
-        return rows, models
-
-    ## One level of processes: seeds when there are several, else bootstrap replicates.
-    ## Seeds and replicates draw in a fixed order, so n_jobs never changes results.
-    outer = min(n_jobs, len(seeds))
-    boot_jobs = n_jobs if outer == 1 else 1
-    out = []
-    for r in Parallel(n_jobs=outer, return_as="generator")(
-            delayed(one_seed)(seed, bar if outer == 1 else _Quiet()) for seed in seeds):
-        out.append(r)
-        if outer != 1:
-            bar.advance(task, per_seed)
-    rows = [row for seed_rows, _ in out for row in seed_rows]
-    models = dict(zip(seeds, (m for _, m in out)))
+    if w_pi is not None:
+        r = est(w_pi)
+        row = dict(key="pi", estimate=ARMS["pi"], score=r["point"], ci_lo=r["ci_lo"],
+                   ci_hi=r["ci_hi"], sigma=r["sigma"], n_eff=r["n_eff"], clipped=r["clipped"])
+        if interval is not None and interval.covers("pi"):
+            ## Serial: a known-weights replicate is too cheap to ship to a process.
+            row["boot_lo"], row["boot_hi"] = _bootstrap(
+                interval.n, 1, clusters, n_u, rng, lambda il, iu: est(w_pi[il], il, iu)["point"])
+        rows.append(row)
 
     if any(row.get("clipped") for row in rows):
         notes.append("a corrected rate fell below 0; use --bootstrap for the interval")
-    if len(seeds) > 1:
-        notes.append(f"mean of {len(seeds)} seeds")
     return Report(pd.DataFrame(rows), data, notes, metric.name, models)

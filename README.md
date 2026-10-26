@@ -56,30 +56,28 @@ uniform sample of the deployment population. `--label` and `--features` rename t
 |---|---|
 | `label` | class name; empty = deployment row |
 | `x_*` | model features |
-| `lat`, `lon` | switch on geo defaults in the CLI: 5 km block CV and fetched covariates |
+| `lat`, `lon` | switch on geo defaults in the CLI: the four fetchable protocols |
 | Z columns, e.g. `dist_to_road`, `elevation` | bias covariates: what drove labeling, named by a protocol; geo ones are fetched from OSM / Copernicus DEM when absent |
 
 ## Python
 
 ```python
 from sklearn.linear_model import LogisticRegression
-from pappi import Accuracy, Bootstrap, Dataset, Protocol, Split, audit
+from pappi import Accuracy, Bootstrap, Dataset, Protocol, audit
 import pappi.geo as geo                              # registers the geo protocols
 
 data = Dataset.from_csv("my_campaign.csv")
 report = audit(data, **geo.defaults(data))           # what the CLI does for lat/lon data
 
-def fit_logreg(X, y, seed):                          # any trainer: returns predict_proba
+def fit_logreg(X, y):                                # any trainer: returns predict_proba
     return LogisticRegression(max_iter=1000).fit(X, y)
 
-site = Split("by site (CV)", groups="site")
 report = audit(Dataset.from_files("labels.parquet", "deploy.parquet"),
                fit_model=fit_logreg,
                protocols=[Protocol("referral", z=["distance_to_clinic"])],
-               in_domain=[Split("random split (CV)"), site], correction_split=site,
                inclusion="p_selected",                     # or a function frame -> probabilities
-               interval=Bootstrap(200), metric=Accuracy(), seeds=10)
-report.frame                                          # per-seed rows
+               interval=Bootstrap(200), metric=Accuracy())
+report.frame                                          # one row per estimate
 
 report = audit(Dataset.from_files("test.parquet", "deploy.parquet"), model=my_model,
                protocols=[Protocol("referral", z=["distance_to_clinic"])])
@@ -87,21 +85,21 @@ report = audit(Dataset.from_files("test.parquet", "deploy.parquet"), model=my_mo
 
 - `Dataset`: `from_csv`, `from_files(labeled, deploy=None)` (csv/parquet/feather), `from_frame`.
 - `protocols`: `Protocol(name, z)` or a registered name (`roadside`, `settlement`, `elevation`, `slope`, `region`, `size` after `import pappi.geo`); each Z is a column name or a pair `(name, fn)` with `fn(frame) -> array`, computed only if the column is missing.
-- `Split(name, groups, assign)`: how rows are split into folds. `groups` is a column name or `(name, fn)`; rows sharing a group share a fold. `assign(n, groups, seed) -> fold id per row` (default `kfold`, as in the paper: each row, or each whole group, gets a random fold out of `folds`).
-  - `in_domain`: the CV rows of the table (default: one random split).
+- `Split(name, groups, assign)`: how rows are split into folds. `groups` is a column name or `(name, fn)`; rows sharing a group share a fold. `assign(n, groups) -> fold id per row` (default `kfold`: each row, or each whole group, gets a random fold out of `folds`).
+  - `in_domain`: the CV rows of the table (default: one random row split).
   - `correction_split`: held-out predictions for the PPI correction (default: `in_domain[0]`).
   - `propensity_split`: folds for the labeled-vs-deployment model over both row sets.
 - `inclusion`: known inclusion probabilities (a column, or `frame -> array`), needed up to a constant; adds a "known inclusion" row.
-- `interval=Bootstrap(n, groups, arms, seeds)`: percentile intervals from resampled label clusters (default: the correction split's groups), refitting the propensity each time. `arms` (e.g. `("x",)`) and `seeds` limit which rows get one. Stored as `boot_lo`/`boot_hi` and shown in the table. The default is the faster delta interval, which treats labels as independent and the weights as fixed; the bootstrap does not.
+- `interval=Bootstrap(n, groups, arms)`: percentile intervals from resampled labels (or label clusters, with `groups`), refitting the propensity each time. `arms` (e.g. `("x",)`) limits which rows get one. Stored as `boot_lo`/`boot_hi` and shown in the table. The default is the faster delta interval, which treats labels as independent and the weights as fixed; the bootstrap does not.
 - `metric`: `MacroF1()` (default), `Accuracy()`, or any object with `observed`, `expected`, `value`, `grad`, `score`.
-- `fit_model`, `fit_propensity`: functions `fit(X, y, seed)` returning an object with `predict_proba(X)` (columns = classes 0..K-1); called once per fold, so the tool never needs your model class. Default: XGBoost with the paper's settings.
+- `fit_model`, `fit_propensity`: functions `fit(X, y)` returning an object with `predict_proba(X)` (columns = classes 0..K-1); called once per fold, so the tool never needs your model class. Default: XGBoost with the paper's settings.
 - `model`: a trained model audited as is, instead of `fit_model`: an object with `predict_proba(X)` or a function `f(X) -> probabilities` (CLI `--model pkg.module:obj`, or a `.pkl`/`.joblib`; loading one runs its code, so use trusted files only). The labeled rows must be a test set it never saw, or the estimate comes out optimistic; the tool cannot check this. The model is never retrained: one "test set (as reported)" row replaces the CV rows. Columns of `predict_proba` must follow the sorted labels (checked when the model has `classes_`); a model fitted on named columns gets them by name.
-- `report.models[seed]`: the models behind the PPI rows: the correction split's fold models by default, or `[your object]` with `model` (wrapped if it is a function or was fitted on named columns). Call them on `report.data.X`; `report.data` holds only the rows the audit kept.
+- `report.models`: the models behind the PPI rows: the correction split's fold models by default, or `[your object]` with `model` (wrapped if it is a function or was fitted on named columns). Call them on `report.data.X`; `report.data` holds only the rows the audit kept.
 - `folds=5`: k of every default (`kfold`) split; each fold model trains on (k-1)/k of the labels. A custom `assign` keeps its own k.
-- `n_jobs`: parallel processes, for the seeds when there are several, else for the bootstrap replicates; the same results for any value.
+- `n_jobs`: parallel processes for the bootstrap replicates; the same results for any value.
 - `light=True` caps deployment at a random 2,000 rows (the caption says how many of how many) and uses 50 boosting rounds; `progress=True` shows a progress bar (on in the CLI).
 
-Geo defaults (`geo.defaults`, applied by the CLI when the table has `lat`/`lon`): the four fetchable protocols, and the paper's 0.045° (~5 km) blocks for the blocked CV row, the correction and the propensity folds (`SpatialBlocks(km=5)` gives true 5 km squares at any latitude).
+Geo defaults (`geo.defaults`, applied by the CLI when the table has `lat`/`lon` and you set no `protocols`): the four fetchable protocols `roadside`, `settlement`, `elevation`, `slope`.
 
 CLI flags: `--fit-model pkg.module:fit`, `--fit-propensity pkg.module:fit`, `--model pkg.module:obj`, `--folds K`, `--jobs J`, `--inclusion COL`, `--bootstrap N`, `--metric accuracy`; in `--config`, `<key>_params` calls `fit_model`, `model` or `fit_propensity` as a factory with those arguments.
 
@@ -112,9 +110,6 @@ label: band
 model: my_model.joblib
 protocols:
   - {name: enrolment, z: [formal_sector, km_to_office]}
-in_domain:
-  - {name: by area (CV), groups: area_id}
-correction: by area (CV)
 bootstrap: 500
 jobs: 8
 ```
@@ -136,7 +131,7 @@ Sources: `GeofabrikLayer(layer, fclass)`, `LocalVector(path)`, `CopernicusDEM()`
 CV rows: in-domain cross-validation on the labels; with `model`, one "test set (as reported)" row
 instead. PPI rows: deployment estimate with the propensity model fit on X, Z, or both; `n_eff` is
 the effective number of labels behind it. The caption lists counts and notes such as
-`light mode: 2,000 of 5,000 deployment rows`. `report.frame` holds per-seed rows with the
+`light mode: 2,000 of 5,000 deployment rows`. `report.frame` holds one row per estimate with the
 propensity `auc` (near 1: labeled and deployment rows barely overlap), medians, and
 `q_clip_share_l` (share of labels whose propensity hits the 1e-3 clip).
 

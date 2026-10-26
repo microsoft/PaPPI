@@ -61,18 +61,6 @@ def SlopeOf(source, name: str, res: float = 30.0, **kw):
     return point_covariate(name, compute, **kw)
 
 
-## Blocks for grouped CV: `km` squares on an equirectangular grid, or `deg` cells on the
-## lon/lat grid (deg=0.045 is the paper's Kenya grid, ~5 km near the equator).
-def SpatialBlocks(km: float = 5.0, deg: float | None = None, **kw):
-    def compute(lon, lat, cache):
-        if deg:
-            return (lat // deg) * 100_000 + lon // deg
-        x = lon * 111.320 * np.cos(np.deg2rad(np.nanmean(lat)))
-        return np.floor(x / km) * 1e6 + np.floor(lat * 110.574 / km)
-
-    return point_covariate(f"block_{deg:g}deg" if deg else f"block_{km:g}km", compute, **kw)
-
-
 def DistToRoad(**kw):
     return DistanceTo(GeofabrikLayer("roads", DRIVABLE), "dist_to_road", **kw)
 
