@@ -167,7 +167,7 @@ def ppi_estimate(
 
 ## IWCV: the same weights on the observed rates over L alone, with no deployment term.
 ## Delta-method interval as in ppi_estimate, without the imputation variance.
-def iwcv_estimate(metric: Metric, y_l: np.ndarray, y_hat_l: np.ndarray, w_l: np.ndarray,
+def iwcv_estimate(metric: Metric, y_hat_l: np.ndarray, y_l: np.ndarray, w_l: np.ndarray,
                   k_classes: int) -> dict:
     mu, V, n_eff = _hajek(w_l, metric.observed(y_l, y_hat_l, k_classes))
     return _delta(metric, mu, V, k_classes) | {"n_eff": n_eff}

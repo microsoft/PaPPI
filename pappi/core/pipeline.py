@@ -190,7 +190,7 @@ class Split:
 
 ## Percentile interval from `n` replicates: labeled rows resampled by `groups` (default:
 ## the correction split's groups, else rows), deployment rows by row; propensity refit.
-## `arms` ("x", "z", "xz", "pi") limits it.
+## `arms` ("x", "z", "xz", "pi") limits it; an IWCV row follows its arm.
 @dataclass(eq=False)
 class Bootstrap:
     n: int = 200
@@ -509,7 +509,7 @@ def _fit(data, z_cols, bar, fit_model, fit_propensity, metric, in_domain,
     ests = [("", ARMS, est)]
     if iwcv:
         ests.append(("iwcv_", IWCV, lambda w, il=slice(None), iu=slice(None):
-                     iwcv_estimate(metric, y[il], yl_hat[il], w, k)))
+                     iwcv_estimate(metric, yl_hat[il], y[il], w, k)))
 
     def points(w, il, iu):
         return [fn(w, il, iu)["point"] for *_, fn in ests]
