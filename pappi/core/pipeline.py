@@ -197,6 +197,11 @@ class Bootstrap:
     groups: object = None
     arms: tuple[str, ...] | None = None
 
+    ## arms="xz" (a missing tuple comma) would match "x" and "z" as substrings.
+    def __post_init__(self):
+        if isinstance(self.arms, str):
+            self.arms = (self.arms,)
+
     def covers(self, key: str) -> bool:
         return self.arms is None or key in self.arms
 
