@@ -48,6 +48,8 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--inclusion", help="column of known inclusion probabilities")
     a.add_argument("--bootstrap", type=int, help="bootstrap replicates for the intervals")
     a.add_argument("--jobs", type=int, help="parallel processes for the bootstrap (same results)")
+    a.add_argument("--iwcv", action="store_true", default=None,
+                   help="add an IWCV row (same weights, no deployment term) after each PPI row")
     a.add_argument("--light", action="store_true", default=None)
     a.add_argument("--out", help="report rows as CSV")
     args = ap.parse_args(argv)
@@ -59,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
         with open(args.config) as f:
             cfg = yaml.safe_load(f) or {}
     keys = ("protocols", "fit_model", "model", "fit_propensity", "folds", "metric", "jobs",
-            "light", "inclusion", "bootstrap")
+            "light", "inclusion", "bootstrap", "iwcv")
     cfg.update({k: v for k, v in vars(args).items() if k in keys and v is not None})
     for key in ("fit_model", "model", "fit_propensity"):
         if key in cfg:

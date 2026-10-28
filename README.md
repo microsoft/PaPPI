@@ -90,7 +90,8 @@ report = audit(Dataset.from_files("test.parquet", "deploy.parquet"), model=my_mo
   - `correction_split`: held-out predictions for the PPI correction (default: `in_domain[0]`).
   - `propensity_split`: folds for the labeled-vs-deployment model over both row sets.
 - `inclusion`: known inclusion probabilities (a column, or `frame -> array`), needed up to a constant; adds a "known inclusion" row.
-- `interval=Bootstrap(n, groups, arms)`: percentile intervals from resampled labels (or label clusters, with `groups`), refitting the propensity each time. `arms` (e.g. `("x",)`) limits which rows get one. Stored as `boot_lo`/`boot_hi` and shown in the table. The default is the faster delta interval, which treats labels as independent and the weights as fixed; the bootstrap does not.
+- `interval=Bootstrap(n, groups, arms)`: percentile intervals from resampled labels (or label clusters, with `groups`), refitting the propensity each time. `arms` (e.g. `("x",)`) limits which rows get one; an IWCV row follows its PPI arm (`"x"` also covers `iwcv_x`). Stored as `boot_lo`/`boot_hi` and shown in the table. The default is the faster delta interval, which treats labels as independent and the weights as fixed; the bootstrap does not.
+- `iwcv=True`: after each PPI row, an IWCV row (importance-weighted CV; key `iwcv_<arm>`) with the same weights but no deployment predictions: the weighted score of the held-out labels. In the paper it is nearly as accurate as PPI, with slightly higher per-run error.
 - `metric`: `MacroF1()` (default), `Accuracy()`, or any object with `observed`, `expected`, `value`, `grad`, `score`.
 - `fit_model`, `fit_propensity`: functions `fit(X, y)` returning an object with `predict_proba(X)` (columns = classes 0..K-1); called once per fold, so the tool never needs your model class. Default: XGBoost with the paper's settings.
 - `model`: a trained model audited as is, instead of `fit_model`: an object with `predict_proba(X)` or a function `f(X) -> probabilities` (CLI `--model pkg.module:obj`, or a `.pkl`/`.joblib`; loading one runs its code, so use trusted files only). The labeled rows must be a test set it never saw, or the estimate comes out optimistic; the tool cannot check this. The model is never retrained: one "test set (as reported)" row replaces the CV rows. Columns of `predict_proba` must follow the sorted labels (checked when the model has `classes_`); a model fitted on named columns gets them by name.
@@ -101,7 +102,7 @@ report = audit(Dataset.from_files("test.parquet", "deploy.parquet"), model=my_mo
 
 Geo defaults (`geo.defaults`, applied by the CLI when the table has `lat`/`lon` and you set no `protocols`): the four fetchable protocols `roadside`, `settlement`, `elevation`, `slope`.
 
-CLI flags: `--fit-model pkg.module:fit`, `--fit-propensity pkg.module:fit`, `--model pkg.module:obj`, `--folds K`, `--jobs J`, `--inclusion COL`, `--bootstrap N`, `--metric accuracy`; in `--config`, `<key>_params` calls `fit_model`, `model` or `fit_propensity` as a factory with those arguments.
+CLI flags: `--fit-model pkg.module:fit`, `--fit-propensity pkg.module:fit`, `--model pkg.module:obj`, `--folds K`, `--jobs J`, `--inclusion COL`, `--bootstrap N`, `--metric accuracy`, `--iwcv`; in `--config`, `<key>_params` calls `fit_model`, `model` or `fit_propensity` as a factory with those arguments.
 
 A `--config` YAML sets the same keys plus custom protocols and splits:
 
@@ -130,14 +131,15 @@ Sources: `GeofabrikLayer(layer, fclass)`, `LocalVector(path)`, `CopernicusDEM()`
 
 CV rows: in-domain cross-validation on the labels; with `model`, one "test set (as reported)" row
 instead. PPI rows: deployment estimate with the propensity model fit on X, Z, or both; `n_eff` is
-the effective number of labels behind it. The caption lists counts and notes such as
+the effective number of labels behind it. IWCV rows (with `iwcv`) reweight the held-out labels
+with the same weights and skip the deployment predictions. The caption lists counts and notes such as
 `light mode: 2,000 of 5,000 deployment rows`. `report.frame` holds one row per estimate with the
 propensity `auc` (near 1: labeled and deployment rows barely overlap), medians, and
 `q_clip_share_l` (share of labels whose propensity hits the 1e-3 clip).
 
 ## Assumptions
 
-- Each PPI row assumes that, given the covariates its propensity uses (X, Z, or both), whether a
+- Each PPI or IWCV row assumes that, given the covariates its propensity uses (X, Z, or both), whether a
   row was labeled does not depend on its label.
 - Every kind of deployment row has some chance of being labeled. Where it has none, weights hit
   the clip and `n_eff` falls.
