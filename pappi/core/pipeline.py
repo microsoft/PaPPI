@@ -21,6 +21,7 @@ from pappi.core.ppi import (
     Metric,
     inclusion_weights,
     inverse_odds_weights,
+    iwcv_estimate,
     ppi_estimate,
 )
 
@@ -28,6 +29,7 @@ N_FOLDS = 5
 LIGHT_U, LIGHT_ROUNDS = 2_000, 50
 ARMS = {"x": "PPI, propensity on X", "z": "PPI, propensity on Z",
         "xz": "PPI, propensity on [X, Z]", "pi": "PPI, known inclusion"}
+IWCV = {key: name.replace("PPI", "IWCV", 1) for key, name in ARMS.items()}
 
 
 ## Contracts the engine relies on (structural: any object with these methods fits).
@@ -316,7 +318,8 @@ def _oof(fit, X, y, ids: np.ndarray, k: int, x_u=None):
 ## model: a trained model audited as is, in place of fit_model; the labeled rows must be
 ## a test set it never saw, or the estimate comes out optimistic. folds: k of the default
 ## (kfold) splits; each fold model trains on (k-1)/k of L. n_jobs: processes for the
-## bootstrap replicates; the same results for any value.
+## bootstrap replicates; the same results for any value. iwcv: after each PPI row, an IWCV
+## row (key "iwcv_<arm>") with the same weights and no deployment term.
 def audit(
     data: Dataset | pd.DataFrame | str | Path,
     fit_model: FitFn | None = None,
@@ -332,6 +335,7 @@ def audit(
     light: bool = False,
     folds: int = N_FOLDS,
     n_jobs: int = 1,
+    iwcv: bool = False,
     progress: bool = False,
 ) -> Report:
     if not isinstance(data, Dataset):
@@ -358,7 +362,7 @@ def audit(
                metric=MacroF1() if metric is None else metric,
                in_domain=in_domain, correction=correction_split, propensity=propensity_split,
                inclusion=inclusion, interval=interval, light=light,
-               folds=folds, n_jobs=n_jobs)
+               folds=folds, n_jobs=n_jobs, iwcv=iwcv)
 
     z_specs = [z for p in protocols for z in get_protocol(p).z]
     g_specs = [x.groups for x in (*in_domain, correction_split, propensity_split, interval)
@@ -407,11 +411,12 @@ def _groups(frame, col, rows):
     return None if col is None else frame.loc[rows, col].to_numpy()
 
 
-## Percentile interval of fn(il, iu) over resampled label clusters and deployment rows.
+## Percentile intervals of fn(il, iu) -> [values] over resampled label clusters and
+## deployment rows: (lo, hi) arrays, one entry per value.
 ## Draws run in order here, so n_jobs never changes results. Copies keep their cluster id,
 ## so a duplicate is never scored by a model that saw its twin.
 def _bootstrap(n: int, n_jobs: int, clusters: np.ndarray, n_u: int, rng,
-               fn) -> tuple[float, float]:
+               fn) -> tuple[np.ndarray, np.ndarray]:
     _, inv = np.unique(clusters, return_inverse=True)
     members = np.split(np.argsort(inv, kind="stable"), np.cumsum(np.bincount(inv))[:-1])
     m = len(members)
@@ -424,13 +429,13 @@ def _bootstrap(n: int, n_jobs: int, clusters: np.ndarray, n_u: int, rng,
 
     ## joblib caps each worker at cores / n_jobs threads; n_jobs=1 runs in this process.
     reps = Parallel(n_jobs=n_jobs)(delayed(fn)(*d) for d in draws())
-    lo, hi = np.percentile(reps, [2.5, 97.5])
-    return float(lo), float(hi)
+    lo, hi = np.percentile(reps, [2.5, 97.5], axis=0)
+    return lo, hi
 
 
 ## Every number the report shows comes from here.
 def _fit(data, z_cols, bar, fit_model, fit_propensity, metric, in_domain,
-         correction, propensity, inclusion, interval, light, folds, n_jobs) -> Report:
+         correction, propensity, inclusion, interval, light, folds, n_jobs, iwcv) -> Report:
     notes = []
     ok = (np.isfinite(data.X).all(axis=1)
           & np.isfinite(data.frame[z_cols].to_numpy(dtype=np.float64)).all(axis=1))
@@ -499,36 +504,55 @@ def _fit(data, z_cols, bar, fit_model, fit_propensity, metric, in_domain,
         return ppi_estimate(metric, p_l[il], yl_hat[il], y[il], w, p_u[:, iu], yu_hat[:, iu], k)
 
     rng = np.random.default_rng(7)
+
+    ## Estimators run on each arm's weights, as (key prefix, row names, fn): PPI, then IWCV.
+    ests = [("", ARMS, est)]
+    if iwcv:
+        ests.append(("iwcv_", IWCV, lambda w, il=slice(None), iu=slice(None):
+                     iwcv_estimate(metric, y[il], yl_hat[il], w, k)))
+
+    def points(w, il, iu):
+        return [fn(w, il, iu)["point"] for *_, fn in ests]
+
+    ## One row per estimator; ci = (lo, hi) bootstrap arrays in the same order.
+    def arm_rows(key, w, ci=None, **extra):
+        out = []
+        for i, (prefix, names, fn) in enumerate(ests):
+            r = fn(w)
+            row = dict(key=prefix + key, estimate=names[key], score=r["point"], ci_lo=r["ci_lo"],
+                       ci_hi=r["ci_hi"], sigma=r["sigma"], n_eff=r["n_eff"],
+                       clipped=r["clipped"], **extra)
+            if ci is not None:
+                row["boot_lo"], row["boot_hi"] = float(ci[0][i]), float(ci[1][i])
+            out.append(row)
+        return out
+
     for key, F in sets.items():
         bar.update(task, description=ARMS[key])
         q = _oof(fit_propensity, F, s, p_assign(len(F), pg), 2)[:, 1]
-        r = est(inverse_odds_weights(q[:n_l]))
-        row = dict(key=key, estimate=ARMS[key], score=r["point"], ci_lo=r["ci_lo"],
-                   ci_hi=r["ci_hi"], sigma=r["sigma"], n_eff=r["n_eff"], clipped=r["clipped"],
-                   auc=float(roc_auc_score(s, q)), q_l_median=float(np.median(q[:n_l])),
-                   q_u_median=float(np.median(q[n_l:])),
-                   q_clip_share_l=float(np.mean(q[:n_l] <= _PI_CLIP_MIN)))
+        ci = None
         if interval is not None and interval.covers(key):
             def rep(il, iu, F=F):
                 rr = np.r_[il, n_l + iu]
                 ## Copies keep their row or group id, so twins share a fold.
                 q_b = _oof(fit_propensity, F[rr], s[rr],
                            p_assign(len(rr), rr if pg is None else pg[rr]), 2)[:, 1]
-                return est(inverse_odds_weights(q_b[:len(il)]), il, iu)["point"]
+                return points(inverse_odds_weights(q_b[:len(il)]), il, iu)
 
-            row["boot_lo"], row["boot_hi"] = _bootstrap(interval.n, n_jobs, clusters, n_u, rng, rep)
-        rows.append(row)
+            ci = _bootstrap(interval.n, n_jobs, clusters, n_u, rng, rep)
+        rows += arm_rows(key, inverse_odds_weights(q[:n_l]), ci,
+                         auc=float(roc_auc_score(s, q)), q_l_median=float(np.median(q[:n_l])),
+                         q_u_median=float(np.median(q[n_l:])),
+                         q_clip_share_l=float(np.mean(q[:n_l] <= _PI_CLIP_MIN)))
         bar.advance(task)
 
     if w_pi is not None:
-        r = est(w_pi)
-        row = dict(key="pi", estimate=ARMS["pi"], score=r["point"], ci_lo=r["ci_lo"],
-                   ci_hi=r["ci_hi"], sigma=r["sigma"], n_eff=r["n_eff"], clipped=r["clipped"])
+        ci = None
         if interval is not None and interval.covers("pi"):
             ## Serial: a known-weights replicate is too cheap to ship to a process.
-            row["boot_lo"], row["boot_hi"] = _bootstrap(
-                interval.n, 1, clusters, n_u, rng, lambda il, iu: est(w_pi[il], il, iu)["point"])
-        rows.append(row)
+            ci = _bootstrap(interval.n, 1, clusters, n_u, rng,
+                            lambda il, iu: points(w_pi[il], il, iu))
+        rows += arm_rows("pi", w_pi, ci)
 
     if any(row.get("clipped") for row in rows):
         notes.append("a corrected rate fell below 0; use --bootstrap for the interval")

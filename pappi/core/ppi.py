@@ -116,6 +116,24 @@ class Accuracy:
         return float(np.mean(y == y_hat))
 
 
+## Hájek-weighted mean of the rows of r, its covariance, and Kish's n_eff.
+def _hajek(w: np.ndarray, r: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
+    w_sum = float(w.sum())
+    mu = (w[:, None] * r).sum(axis=0) / w_sum
+    c = r - mu
+    V = (w[:, None] ** 2 * c).T @ c / (w_sum * w_sum)
+    return mu, V, (w_sum * w_sum) / max(float((w * w).sum()), 1e-12)
+
+
+## Metric at mu with a delta-method 95% interval from the covariance of mu.
+def _delta(metric: Metric, mu: np.ndarray, Sigma: np.ndarray, K: int) -> dict:
+    point = metric.value(mu, K)
+    grad = metric.grad(mu, K)
+    sigma = float(np.sqrt(max(float(grad @ Sigma @ grad), 0.0)))
+    return {"point": point, "ci_lo": point - 1.96 * sigma, "ci_hi": point + 1.96 * sigma,
+            "sigma": sigma, "clipped": bool((mu < 0).any())}
+
+
 ## Eq. (2) of the paper: imputation over U + Hájek-weighted
 ## residual over L, delta-method 95% CI. Cross-fit: p_hat_u (models, n_u, k) and
 ## y_hat_u (models, n_u) hold each fold model's predictions; U imputes their mean row.
@@ -141,31 +159,18 @@ def ppi_estimate(
     centered_u = g_u - mu_imp
     S_imp = centered_u.T @ centered_u / N
 
-    w_sum = float(w_l.sum())
-    w_sq = float((w_l * w_l).sum())
-    mu_res = (w_l[:, None] * r_l).sum(axis=0) / w_sum
-    centered_l = r_l - mu_res
-    V_res = (w_l[:, None] ** 2 * centered_l).T @ centered_l / (w_sum * w_sum)
-    n_eff = (w_sum * w_sum) / max(w_sq, 1e-12)
-
+    mu_res, V_res, n_eff = _hajek(w_l, r_l)
     mu_total = mu_imp + mu_res
-    point = metric.value(mu_total, K)
+    return _delta(metric, mu_total, S_imp / N + V_res, K) | {
+        "rates": mu_total, "rectifier": mu_res, "imputation": mu_imp, "n_eff": n_eff}
 
-    Sigma = S_imp / N + V_res
-    grad = metric.grad(mu_total, K)
-    sigma2 = float(grad @ Sigma @ grad)
-    sigma = float(np.sqrt(max(sigma2, 0.0)))
-    return {
-        "point": point,
-        "ci_lo": point - 1.96 * sigma,
-        "ci_hi": point + 1.96 * sigma,
-        "sigma": sigma,
-        "rates": mu_total,
-        "rectifier": mu_res,
-        "imputation": mu_imp,
-        "n_eff": float(n_eff),
-        "clipped": bool((mu_total < 0).any()),
-    }
+
+## IWCV: the same weights on the observed rates over L alone, with no deployment term.
+## Delta-method interval as in ppi_estimate, without the imputation variance.
+def iwcv_estimate(metric: Metric, y_l: np.ndarray, y_hat_l: np.ndarray, w_l: np.ndarray,
+                  k_classes: int) -> dict:
+    mu, V, n_eff = _hajek(w_l, metric.observed(y_l, y_hat_l, k_classes))
+    return _delta(metric, mu, V, k_classes) | {"n_eff": n_eff}
 
 
 def ppi_macro_f1(p_hat_l, y_hat_l, y_l, w_l, p_hat_u, y_hat_u, k_classes: int) -> dict:
