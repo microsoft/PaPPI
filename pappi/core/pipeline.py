@@ -274,7 +274,12 @@ def _as_model(m, data: Dataset) -> Fitted:
                             "probabilities")
         m = SimpleNamespace(predict_proba=m)
     names = [str(c) for c in getattr(m, "classes_", data.classes)]
-    if names not in (list(data.classes), [str(i) for i in range(len(data.classes))]):
+    codes = [str(i) for i in range(len(data.classes))]
+    ## Columns 0..k-1 mean sorted-label positions, but not when the labels are the numbers
+    ## 0..k-1 sorted as strings: "10" before "2", so column 2 (class 2) would score "10".
+    num = pd.to_numeric(pd.Series(data.classes), errors="coerce").tolist()
+    misordered = sorted(num) == list(range(len(codes))) and num != sorted(num)
+    if names != list(data.classes) and (names != codes or misordered):
         raise ValueError(f"model classes {names} != label classes {list(data.classes)}")
     cols = getattr(m, "feature_names_in_", None)
     if cols is None:
