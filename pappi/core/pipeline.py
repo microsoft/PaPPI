@@ -279,6 +279,11 @@ def _as_model(m, data: Dataset) -> Fitted:
     ## 0..k-1 sorted as strings: "10" before "2", so column 2 (class 2) would score "10".
     num = pd.to_numeric(pd.Series(data.classes), errors="coerce").tolist()
     misordered = sorted(num) == list(range(len(codes))) and num != sorted(num)
+    ## Without classes_, the columns are taken to follow data.classes; numeric labels sorted
+    ## as strings ("10" before "2") would make that silently wrong, so the model must say.
+    if not hasattr(m, "classes_") and not np.isnan(num).any() and num != sorted(num):
+        raise ValueError(f"numeric labels sort as strings here {list(data.classes)}; give the "
+                         "model a classes_ attribute listing its column order")
     if names != list(data.classes) and (names != codes or misordered):
         raise ValueError(f"model classes {names} != label classes {list(data.classes)}")
     cols = getattr(m, "feature_names_in_", None)
