@@ -284,6 +284,11 @@ def _as_model(m, data: Dataset) -> Fitted:
     if not hasattr(m, "classes_") and not np.isnan(num).any() and num != sorted(num):
         raise ValueError(f"numeric labels sort as strings here {list(data.classes)}; give the "
                          "model a classes_ attribute listing its column order")
+    ## Codes 0..k-1 stand for the labels only when the labels are numbers: a model fit on
+    ## is_crop 0/1 against labels "crop"/"noncrop" would be scored with its classes swapped.
+    if names == codes and names != list(data.classes) and np.isnan(num).any():
+        raise ValueError(f"model classes {names} are codes but the labels are names "
+                         f"{list(data.classes)}; fit the model on the label names")
     if names != list(data.classes) and (names != codes or misordered):
         raise ValueError(f"model classes {names} != label classes {list(data.classes)}")
     cols = getattr(m, "feature_names_in_", None)
