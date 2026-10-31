@@ -54,9 +54,9 @@ uniform sample of the deployment population. `--label` and `--features` rename t
 
 | column | meaning |
 |---|---|
-| `label` | class name; empty = deployment row |
-| `x_*` | model features |
-| `lat`, `lon` | switch on geo defaults in the CLI: the four fetchable protocols |
+| `label` | class name; empty = deployment row. With a separate deployment file, integer labels read as `3.0` and a `model` fitted on `3` is rejected: keep them in one CSV or store them as text |
+| `x_*` | model features, numbers only: encode categorical columns first; rows with a missing value are dropped (the caption says how many) |
+| `lat`, `lon` | exactly these names; switch on geo defaults in the CLI: the four fetchable protocols |
 | Z columns, e.g. `dist_to_road`, `elevation` | bias covariates: what drove labeling, named by a protocol; geo ones are fetched from OSM / Copernicus DEM when absent |
 
 ## Python
@@ -88,7 +88,7 @@ report = audit(Dataset.from_files("test.parquet", "deploy.parquet"), model=my_mo
 - `Split(name, groups, assign)`: how rows are split into folds. `groups` is a column name or `(name, fn)`; rows sharing a group share a fold. `assign(n, groups) -> fold id per row` (default `kfold`: each row, or each whole group, gets a random fold out of `folds`).
   - `in_domain`: the CV rows of the table (default: one random row split).
   - `correction_split`: held-out predictions for the PPI correction (default: `in_domain[0]`).
-  - `propensity_split`: folds for the labeled-vs-deployment model over both row sets.
+  - `propensity_split`: folds for the labeled-vs-deployment model over both row sets (default: the correction split's groups on labeled rows, each deployment row alone). If you group the folds, e.g. by spatial block, pass the same groups here (Python only); otherwise a held-out block's deployment neighbours stay in training and the propensity model goes wrong (`auc` below 0.5).
 - `inclusion`: known inclusion probabilities (a column, or `frame -> array`), needed up to a constant; adds a "known inclusion" row.
 - `interval=Bootstrap(n, groups, arms)`: percentile intervals from resampled labels (or label clusters, with `groups`), refitting the propensity each time. `arms` (e.g. `("x",)`) limits which rows get one; an IWCV row follows its PPI arm (`"x"` also covers `iwcv_x`). Stored as `boot_lo`/`boot_hi` and shown in the table. The default is the faster delta interval, which treats labels as independent and the weights as fixed; the bootstrap does not.
 - `iwcv=True`: after each PPI row, an IWCV row (importance-weighted CV; key `iwcv_<arm>`) with the same weights but no deployment predictions: the weighted score of the held-out labels. In the paper it is nearly as accurate as PPI, with slightly higher per-run error.
@@ -102,7 +102,7 @@ report = audit(Dataset.from_files("test.parquet", "deploy.parquet"), model=my_mo
 
 Geo defaults (`geo.defaults`, applied by the CLI when the table has `lat`/`lon` and you set no `protocols`): the four fetchable protocols `roadside`, `settlement`, `elevation`, `slope`.
 
-CLI flags: `--fit-model pkg.module:fit`, `--fit-propensity pkg.module:fit`, `--model pkg.module:obj`, `--folds K`, `--jobs J`, `--inclusion COL`, `--bootstrap N`, `--metric accuracy`, `--iwcv`; in `--config`, `<key>_params` calls `fit_model`, `model` or `fit_propensity` as a factory with those arguments.
+CLI flags: `--fit-model pkg.module:fit`, `--fit-propensity pkg.module:fit`, `--model pkg.module:obj`, `--folds K`, `--jobs J`, `--inclusion COL`, `--bootstrap N`, `--metric accuracy`, `--iwcv`; a module in the current folder needs `PYTHONPATH=. pappi audit ...`; in `--config`, `<key>_params` calls `fit_model`, `model` or `fit_propensity` as a factory with those arguments.
 
 A `--config` YAML sets the same keys plus custom protocols and splits:
 
@@ -135,7 +135,8 @@ the effective number of labels behind it. IWCV rows (with `iwcv`) reweight the h
 with the same weights and skip the deployment predictions. The caption lists counts and notes such as
 `light mode: 2,000 of 5,000 deployment rows`. `report.frame` holds one row per estimate with the
 propensity `auc` (near 1: labeled and deployment rows barely overlap), medians, and
-`q_clip_share_l` (share of labels whose propensity hits the 1e-3 clip).
+`q_clip_share_l` (share of labels whose propensity hits the 1e-3 clip). Treat a PPI row with
+`n_eff` below a few dozen or `auc` near 1 as no usable estimate: its interval is not reliable.
 
 ## Assumptions
 
@@ -144,6 +145,10 @@ propensity `auc` (near 1: labeled and deployment rows barely overlap), medians, 
 - Every kind of deployment row has some chance of being labeled. Where it has none, weights hit
   the clip and `n_eff` falls.
 - Deployment rows are a uniform sample of the population the estimate is about.
+- Held-out labels are as new to each fold model as deployment rows are. If labels come in
+  clusters (several rows per photo, field or transect), split by the cluster with
+  `Split(name, groups=...)` (the bootstrap then resamples whole clusters); the default row
+  split puts near-twins on both sides and biases the estimate.
 - With `model`, the labeled rows were not used to train it.
 - With `fit_model`, the PPI rows estimate the mean deployment score of the correction split's
   fold models, each trained on (k-1)/k of the labels: every fold model predicts the deployment
