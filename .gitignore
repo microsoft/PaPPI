@@ -1,0 +1,9 @@
+__pycache__/
+*.egg-info/
+.venv/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+## The lock would pin the local package index; the published package resolves from PyPI.
+uv.lock

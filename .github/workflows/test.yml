@@ -1,0 +1,17 @@
+name: tests
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+      - run: uv venv --python ${{ matrix.python }}
+      - run: uv pip install -r requirements.txt pytest ruff
+      - run: uv pip install --no-deps .
+      - run: .venv/bin/pytest
+      - run: .venv/bin/ruff check
+        if: matrix.python == '3.13'
