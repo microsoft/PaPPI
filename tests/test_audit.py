@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from pappi import Accuracy, Protocol, Split, audit
+from pappi import Accuracy, Bootstrap, MacroF1, Protocol, Split, audit
 from pappi.cli import main
 from pappi.demo import synthetic_campaign, true_score
 
@@ -59,6 +59,50 @@ def test_crossfit_covers_the_models_it_scores():
     truth = np.mean([np.mean(m.predict_proba(np.zeros((1000, 1))).argmax(1) == y_u)
                      for m in r.models])
     assert row.ci_lo <= truth <= row.ci_hi
+
+
+@pytest.mark.parametrize("metric, truth", [
+    (Accuracy(), 0.5),
+    (MacroF1(), (8 / 13 + 2 / 7) / 2),
+])
+@pytest.mark.parametrize("clusters", [None, "fold", "cluster", "mixed"])
+def test_unequal_correction_folds_keep_model_target(metric, truth, clusters):
+    fold_ids = np.r_[np.full(900, -7), np.full(100, 13)]
+    frame = pd.DataFrame({
+        "x_0": np.zeros(2000),
+        "label": np.r_[np.tile(["A", "A", "A", "A", "B"], 200), [""] * 1000],
+        "fold": np.r_[fold_ids, np.zeros(1000)],
+        "cluster": np.arange(2000) % 50,
+        "mixed": np.r_[np.zeros(899), np.ones(101), np.zeros(1000)],
+        "p_selected": np.r_[np.ones(900), np.full(100, 0.2), np.ones(1000)],
+    })
+
+    class Constant:
+        def __init__(self, probabilities):
+            self.probabilities = probabilities
+
+        def predict_proba(self, X):
+            return np.tile(self.probabilities, (len(X), 1))
+
+    ## The models always predict A and B, respectively, on an 80/20 population.
+    def trainer(X, y):
+        return Constant([0.9, 0.1] if len(y) == 100 else [0.4, 0.6])
+
+    split = Split("unequal", groups="fold" if clusters == "fold" else None,
+                  assign=lambda n, g: fold_ids)
+    report = audit(
+        frame, fit_model=trainer, fit_propensity=lambda X, y: Constant([0.5, 0.5]),
+        in_domain=[split], inclusion="p_selected", metric=metric, iwcv=True,
+        interval=Bootstrap(30, groups=clusters, arms=("x", "pi")),
+    )
+    rows = report.frame.set_index("key")
+    for key in ("x", "pi", "iwcv_x", "iwcv_pi"):
+        row = rows.loc[key]
+        assert row.score == pytest.approx(truth)
+        assert row.ci_lo <= truth <= row.ci_hi
+        if isinstance(metric, Accuracy):
+            assert row.sigma == pytest.approx(np.sqrt(0.8 * 0.2 / 4 * (1 / 900 + 1 / 100)))
+        assert row.boot_lo - 1e-12 <= truth <= row.boot_hi + 1e-12
 
 
 def test_custom_propensity_assign_without_groups_is_used():
