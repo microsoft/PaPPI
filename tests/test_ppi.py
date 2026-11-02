@@ -2,8 +2,9 @@
 # Licensed under the MIT License.
 
 import numpy as np
+import pytest
 
-from pappi.core.ppi import MacroF1, inclusion_weights, macro_f1, ppi_estimate
+from pappi.core.ppi import Accuracy, MacroF1, inclusion_weights, macro_f1, ppi_estimate
 
 
 ## The estimator alone, with known inclusion weights. The model is calibrated on near rows
@@ -32,3 +33,11 @@ def test_ppi_interval_covers_truth_with_known_weights():
     assert 0.90 <= weighted[:, 1].mean() <= 0.99
     assert abs(weighted[:, 0].mean() - truth) < 0.005
     assert unweighted[:, 1].mean() < 0.5
+
+
+def test_crossfit_estimate_requires_correction_fold_ids():
+    p = np.tile([0.9, 0.1], (2, 1))
+    p_u = np.stack([p, p])
+    with pytest.raises(ValueError, match="fold_l"):
+        ppi_estimate(Accuracy(), p, p.argmax(1), np.array([0, 1]), np.ones(2),
+                     p_u, p_u.argmax(2), 2)

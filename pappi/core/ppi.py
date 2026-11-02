@@ -116,8 +116,16 @@ class Accuracy:
         return float(np.mean(y == y_hat))
 
 
-## Hájek-weighted mean of the rows of r, its covariance, and Kish's n_eff.
-def _hajek(w: np.ndarray, r: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
+## Hájek-weighted mean, covariance, and Kish's n_eff. With fold_l, normalize within
+## each correction fold, then combine fold means equally and their variances by 1/m**2.
+def _hajek(w: np.ndarray, r: np.ndarray,
+           fold_l: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray, float]:
+    if fold_l is not None:
+        parts = [_hajek(w[fold_l == f], r[fold_l == f]) for f in np.unique(fold_l)]
+        means, covariances, effective = zip(*parts)
+        m = len(parts)
+        return (np.mean(means, axis=0), np.sum(covariances, axis=0) / m**2,
+                float(m**2 / np.sum(1 / np.asarray(effective))))
     w_sum = float(w.sum())
     mu = (w[:, None] * r).sum(axis=0) / w_sum
     c = r - mu
@@ -136,7 +144,8 @@ def _delta(metric: Metric, mu: np.ndarray, Sigma: np.ndarray, K: int) -> dict:
 
 ## Eq. (2) of the paper: imputation over U + Hájek-weighted
 ## residual over L, delta-method 95% CI. Cross-fit: p_hat_u (models, n_u, k) and
-## y_hat_u (models, n_u) hold each fold model's predictions; U imputes their mean row.
+## y_hat_u (models, n_u) hold each fold model's predictions. fold_l identifies each
+## label's correction fold; imputation and correction both average folds equally.
 def ppi_estimate(
     metric: Metric,
     p_hat_l: np.ndarray,
@@ -146,8 +155,14 @@ def ppi_estimate(
     p_hat_u: np.ndarray,
     y_hat_u: np.ndarray,
     k_classes: int,
+    fold_l: np.ndarray | None = None,
 ) -> dict:
     K = k_classes
+    if p_hat_u.ndim == 3 and len(p_hat_u) > 1:
+        if fold_l is None:
+            raise ValueError("cross-fit estimates require fold_l for the correction labels")
+        if len(np.unique(fold_l)) != len(p_hat_u):
+            raise ValueError("every deployment fold model needs held-out correction labels")
     g_l = metric.expected(p_hat_l, y_hat_l, K)
     h_l = metric.observed(y_l, y_hat_l, K)
     r_l = h_l - g_l
@@ -159,7 +174,7 @@ def ppi_estimate(
     centered_u = g_u - mu_imp
     S_imp = centered_u.T @ centered_u / N
 
-    mu_res, V_res, n_eff = _hajek(w_l, r_l)
+    mu_res, V_res, n_eff = _hajek(w_l, r_l, fold_l)
     mu_total = mu_imp + mu_res
     return _delta(metric, mu_total, S_imp / N + V_res, K) | {
         "rates": mu_total, "rectifier": mu_res, "imputation": mu_imp, "n_eff": n_eff}
@@ -168,13 +183,15 @@ def ppi_estimate(
 ## IWCV: the same weights on the observed rates over L alone, with no deployment term.
 ## Delta-method interval as in ppi_estimate, without the imputation variance.
 def iwcv_estimate(metric: Metric, y_hat_l: np.ndarray, y_l: np.ndarray, w_l: np.ndarray,
-                  k_classes: int) -> dict:
-    mu, V, n_eff = _hajek(w_l, metric.observed(y_l, y_hat_l, k_classes))
+                  k_classes: int, fold_l: np.ndarray | None = None) -> dict:
+    mu, V, n_eff = _hajek(w_l, metric.observed(y_l, y_hat_l, k_classes), fold_l)
     return _delta(metric, mu, V, k_classes) | {"n_eff": n_eff}
 
 
-def ppi_macro_f1(p_hat_l, y_hat_l, y_l, w_l, p_hat_u, y_hat_u, k_classes: int) -> dict:
-    return ppi_estimate(MacroF1(), p_hat_l, y_hat_l, y_l, w_l, p_hat_u, y_hat_u, k_classes)
+def ppi_macro_f1(p_hat_l, y_hat_l, y_l, w_l, p_hat_u, y_hat_u, k_classes: int,
+                 fold_l: np.ndarray | None = None) -> dict:
+    return ppi_estimate(MacroF1(), p_hat_l, y_hat_l, y_l, w_l, p_hat_u, y_hat_u,
+                        k_classes, fold_l)
 
 
 ## w = (1-q)/q is proportional to p_U/p_L; 1/q is not.

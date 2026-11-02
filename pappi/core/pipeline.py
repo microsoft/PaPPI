@@ -190,6 +190,7 @@ class Split:
 
 ## Percentile interval from `n` replicates: labeled rows resampled by `groups` (default:
 ## the correction split's groups, else rows), deployment rows by row; propensity refit.
+## Resampling preserves correction folds and keeps label clusters intact.
 ## `arms` ("x", "z", "xz", "pi") limits it; an IWCV row follows its arm.
 @dataclass(eq=False)
 class Bootstrap:
@@ -436,14 +437,26 @@ def _groups(frame, col, rows):
 ## Draws run in order here, so n_jobs never changes results. Copies keep their cluster id,
 ## so a duplicate is never scored by a model that saw its twin.
 def _bootstrap(n: int, n_jobs: int, clusters: np.ndarray, n_u: int, rng,
-               fn) -> tuple[np.ndarray, np.ndarray]:
+               fn, fold_l: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
     _, inv = np.unique(clusters, return_inverse=True)
     members = np.split(np.argsort(inv, kind="stable"), np.cumsum(np.bincount(inv))[:-1])
     m = len(members)
+    pools = [np.arange(m)]
+    n_folds = 0 if fold_l is None else len(np.unique(fold_l))
+    if fold_l is not None:
+        cluster_folds = [np.unique(fold_l[rows]) for rows in members]
+        if all(len(f) == 1 for f in cluster_folds):
+            ids = np.array([f[0] for f in cluster_folds])
+            pools = [np.flatnonzero(ids == f) for f in np.unique(ids)]
 
     def draws():
         for _ in range(n):
-            il = np.concatenate([members[j] for j in rng.integers(0, m, m)])
+            while True:
+                selected = np.concatenate([rng.choice(pool, len(pool)) for pool in pools])
+                il = np.concatenate([members[j] for j in selected])
+                ## Cross-fold clusters stay intact; redraw if a correction fold disappears.
+                if fold_l is None or len(np.unique(fold_l[il])) == n_folds:
+                    break
             iu = rng.integers(0, n_u, n_u)
             yield il, iu
 
@@ -512,6 +525,7 @@ def _fit(data, z_cols, bar, fit_model, fit_propensity, metric, in_domain,
         if sp is correction:
             p, p_u, models = _oof(fit_model, x_l, y, ids, k, x_u)
             p_l = p
+            fold_l = ids
         else:
             p = _oof(fit_model, x_l, y, ids, k)
         if sp in in_domain:
@@ -521,7 +535,8 @@ def _fit(data, z_cols, bar, fit_model, fit_propensity, metric, in_domain,
     yl_hat, yu_hat = p_l.argmax(1), p_u.argmax(2)
 
     def est(w, il=slice(None), iu=slice(None)):
-        return ppi_estimate(metric, p_l[il], yl_hat[il], y[il], w, p_u[:, iu], yu_hat[:, iu], k)
+        return ppi_estimate(metric, p_l[il], yl_hat[il], y[il], w, p_u[:, iu], yu_hat[:, iu],
+                            k, fold_l[il])
 
     rng = np.random.default_rng(7)
 
@@ -529,7 +544,7 @@ def _fit(data, z_cols, bar, fit_model, fit_propensity, metric, in_domain,
     ests = [("", ARMS, est)]
     if iwcv:
         ests.append(("iwcv_", IWCV, lambda w, il=slice(None), iu=slice(None):
-                     iwcv_estimate(metric, yl_hat[il], y[il], w, k)))
+                     iwcv_estimate(metric, yl_hat[il], y[il], w, k, fold_l[il])))
 
     def points(w, il, iu):
         return [fn(w, il, iu)["point"] for *_, fn in ests]
@@ -559,7 +574,7 @@ def _fit(data, z_cols, bar, fit_model, fit_propensity, metric, in_domain,
                            p_assign(len(rr), rr if pg is None else pg[rr]), 2)[:, 1]
                 return points(inverse_odds_weights(q_b[:len(il)]), il, iu)
 
-            ci = _bootstrap(interval.n, n_jobs, clusters, n_u, rng, rep)
+            ci = _bootstrap(interval.n, n_jobs, clusters, n_u, rng, rep, fold_l)
         rows += arm_rows(key, inverse_odds_weights(q[:n_l]), ci,
                          auc=float(roc_auc_score(s, q)), q_l_median=float(np.median(q[:n_l])),
                          q_u_median=float(np.median(q[n_l:])),
@@ -571,7 +586,7 @@ def _fit(data, z_cols, bar, fit_model, fit_propensity, metric, in_domain,
         if interval is not None and interval.covers("pi"):
             ## Serial: a known-weights replicate is too cheap to ship to a process.
             ci = _bootstrap(interval.n, 1, clusters, n_u, rng,
-                            lambda il, iu: points(w_pi[il], il, iu))
+                            lambda il, iu: points(w_pi[il], il, iu), fold_l)
         rows += arm_rows("pi", w_pi, ci)
 
     if any(row.get("clipped") for row in rows):
