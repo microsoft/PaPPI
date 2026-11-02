@@ -6,8 +6,6 @@ Watch the [PaPPI explainer video](https://opendata.aiforgood.ai/videos/pappi-ppi
 
 https://github.com/user-attachments/assets/0cdb3407-373c-40a7-b2dc-8b19ca6da28c
 
-![audit output](docs/audit_output.svg)
-
 ## Setup
 
 PaPPI requires Python 3.10 or newer.
@@ -47,6 +45,8 @@ Audit a trained model with labeled rows that it has never seen:
 ```console
 $ pappi audit test_and_deploy.csv --model my_model.joblib
 ```
+
+![audit output](docs/audit_output.svg)
 
 ## Input
 
