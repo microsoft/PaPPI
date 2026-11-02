@@ -2,6 +2,10 @@
 
 PaPPI (Protocol-aware Prediction-Powered Inference) estimates a crop map's macro-F1 or accuracy across its deployment area, with a confidence interval. It uses biased field labels and unlabeled deployment points. Crop maps are usually evaluated on labels collected near roads or in a few survey areas, so their reported scores can overstate performance across the area they cover.
 
+Watch the [PaPPI explainer video](https://opendata.aiforgood.ai/videos/pappi-ppi-explainer.mp4).
+
+https://github.com/user-attachments/assets/0cdb3407-373c-40a7-b2dc-8b19ca6da28c
+
 ![audit output](docs/audit_output.svg)
 
 ## Setup
