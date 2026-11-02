@@ -1,22 +1,20 @@
 # PaPPI
 
-Crop maps are usually evaluated on labels collected near roads or in a few survey areas, so the
-reported score can overstate performance on the area the map covers. PaPPI (Protocol-aware
-Prediction-Powered Inference) estimates a model's macro-F1 or accuracy on the whole deployment
-area, with a confidence interval, from those biased labels plus unlabeled deployment points.
+PaPPI (Protocol-aware Prediction-Powered Inference) estimates a crop map's macro-F1 or accuracy across its deployment area, with a confidence interval. It uses biased field labels and unlabeled deployment points. Crop maps are usually evaluated on labels collected near roads or in a few survey areas, so their reported scores can overstate performance across the area they cover.
 
 ![audit output](docs/audit_output.svg)
 
 ## Setup
 
-Python 3.10 or newer.
+PaPPI requires Python 3.10 or newer.
 
 ```console
 $ pip install "pappi[geo] @ git+https://github.com/microsoft/PaPPI"
 ```
 
-Drop `[geo]` if your table already holds its bias covariates; the extra adds the
-OpenStreetMap and Copernicus DEM fetchers. For the exact versions this release was tested with:
+The `[geo]` extra adds the OpenStreetMap and Copernicus DEM fetchers. Omit it if your table already contains its bias covariates.
+
+The following commands install the exact dependency versions tested for this release:
 
 ```console
 $ git clone https://github.com/microsoft/PaPPI && cd PaPPI
@@ -26,22 +24,21 @@ $ pip install --no-deps .
 
 ## Run
 
-On your own campaign (columns under [Input](#input)):
+Audit your campaign with the columns described under [Input](#input):
 
 ```console
 $ pappi audit my_campaign.csv
 ```
 
-Or on a synthetic roadside campaign with known truth, no downloads, about 10 seconds:
+The synthetic roadside example runs in about 10 seconds without downloads:
 
 ```console
 $ python examples/quickstart.py
 ```
 
-Random CV scores the near-road labels; the PPI rows estimate the score on all deployment rows,
-and the last line prints that score from the hidden labels.
+Random cross-validation (CV) scores the near-road labels. The PPI rows estimate performance on the deployment rows, and the last line prints the deployment score calculated from hidden labels.
 
-To audit a model you already trained, make the labeled rows a test set it never saw:
+Audit a trained model with labeled rows that it has never seen:
 
 ```console
 $ pappi audit test_and_deploy.csv --model my_model.joblib
@@ -49,62 +46,106 @@ $ pappi audit test_and_deploy.csv --model my_model.joblib
 
 ## Input
 
-One row per sample. Rows with a `label` are your labeled set; rows with an empty `label` are a
-uniform sample of the deployment population. `--label` and `--features` rename the columns.
+Each row represents one sample. Rows with a `label` form the labeled set. Rows with an empty `label` must be a uniform sample of the deployment population. `--label` changes the label column name, and `--features` changes the feature-column prefix.
 
-| column | meaning |
+| Column | Meaning |
 |---|---|
-| `label` | class name; empty = deployment row. With a separate deployment file, integer labels read as `3.0` and a `model` fitted on `3` is rejected: keep them in one CSV or store them as text |
-| `x_*` | model features, numbers only: encode categorical columns first; rows with a missing value are dropped (the caption says how many) |
-| `lat`, `lon` | exactly these names; switch on geo defaults in the CLI: the four fetchable protocols |
-| Z columns, e.g. `dist_to_road`, `elevation` | bias covariates: what drove labeling, named by a protocol; geo ones are fetched from OSM / Copernicus DEM when absent |
+| `label` | The class name. Leave it empty for deployment rows. |
+| `x_*` | Numeric model features. Encode categorical features first. PaPPI drops rows with missing feature values and reports the count in the caption. |
+| `lat`, `lon` | Point coordinates. The CLI applies the four geo defaults when these exact column names are present and no protocols are specified. |
+| Z columns, such as `dist_to_road` or `elevation` | Covariates that influenced labeling, selected by a protocol. PaPPI fetches missing geo covariates from OpenStreetMap or Copernicus DEM. |
+
+Integer labels can become `3.0` when you use a separate deployment file. A trained `model` with class `3` will then be rejected. Keep the rows in one CSV or store the labels as text.
 
 ## Python
+
+Importing `pappi.geo` registers the geo protocols. `geo.defaults(data)` selects the same protocols that the CLI uses for tables with `lat` and `lon`.
 
 ```python
 from sklearn.linear_model import LogisticRegression
 from pappi import Accuracy, Bootstrap, Dataset, Protocol, audit
-import pappi.geo as geo                              # registers the geo protocols
+import pappi.geo as geo
 
 data = Dataset.from_csv("my_campaign.csv")
-report = audit(data, **geo.defaults(data))           # what the CLI does for lat/lon data
+report = audit(data, **geo.defaults(data))
 
-def fit_logreg(X, y):                                # any trainer: returns predict_proba
+
+def fit_logreg(X, y):
     return LogisticRegression(max_iter=1000).fit(X, y)
 
-report = audit(Dataset.from_files("labels.parquet", "deploy.parquet"),
-               fit_model=fit_logreg,
-               protocols=[Protocol("referral", z=["distance_to_clinic"])],
-               inclusion="p_selected",                     # or a function frame -> probabilities
-               interval=Bootstrap(200), metric=Accuracy())
-report.frame                                          # one row per estimate
 
-report = audit(Dataset.from_files("test.parquet", "deploy.parquet"), model=my_model,
-               protocols=[Protocol("referral", z=["distance_to_clinic"])])
+report = audit(
+    Dataset.from_files("labels.parquet", "deploy.parquet"),
+    fit_model=fit_logreg,
+    protocols=[Protocol("referral", z=["distance_to_clinic"])],
+    inclusion="p_selected",
+    interval=Bootstrap(200),
+    metric=Accuracy(),
+)
+report.frame
 ```
 
-- `Dataset`: `from_csv`, `from_files(labeled, deploy=None)` (csv/parquet/feather), `from_frame`.
-- `protocols`: `Protocol(name, z)` or a registered name (`roadside`, `settlement`, `elevation`, `slope`, `region`, `size` after `import pappi.geo`); each Z is a column name or a pair `(name, fn)` with `fn(frame) -> array`, computed only if the column is missing.
-- `Split(name, groups, assign)`: how rows are split into folds. `groups` is a column name or `(name, fn)`; rows sharing a group share a fold. `assign(n, groups) -> fold id per row` (default `kfold`: each row, or each whole group, gets a random fold out of `folds`).
-  - `in_domain`: the CV rows of the table (default: one random row split).
-  - `correction_split`: held-out predictions for the PPI correction (default: `in_domain[0]`).
-  - `propensity_split`: folds for the labeled-vs-deployment model over both row sets (default: the correction split's groups on labeled rows, each deployment row alone). If you group the folds, e.g. by spatial block, pass the same groups here (Python only); otherwise a held-out block's deployment neighbours stay in training and the propensity model goes wrong (`auc` below 0.5).
-- `inclusion`: known inclusion probabilities (a column, or `frame -> array`), needed up to a constant; adds a "known inclusion" row.
-- `interval=Bootstrap(n, groups, arms)`: percentile intervals from resampled labels (or label clusters, with `groups`), refitting the propensity each time. `arms` (e.g. `("x",)`) limits which rows get one; an IWCV row follows its PPI arm (`"x"` also covers `iwcv_x`). Stored as `boot_lo`/`boot_hi` and shown in the table. The default is the faster delta interval, which treats labels as independent and the weights as fixed; the bootstrap does not.
-- `iwcv=True`: after each PPI row, an IWCV row (importance-weighted CV; key `iwcv_<arm>`) with the same weights but no deployment predictions: the weighted score of the held-out labels. In the paper it is nearly as accurate as PPI, with slightly higher per-run error.
-- `metric`: `MacroF1()` (default), `Accuracy()`, or any object with `observed`, `expected`, `value`, `grad`, `score`.
-- `fit_model`, `fit_propensity`: functions `fit(X, y)` returning an object with `predict_proba(X)` (columns = classes 0..K-1); called once per fold, so the tool never needs your model class. Default: XGBoost with the paper's settings.
-- `model`: a trained model audited as is, instead of `fit_model`: an object with `predict_proba(X)` or a function `f(X) -> probabilities` (CLI `--model pkg.module:obj`, or a `.pkl`/`.joblib`; loading one runs its code, so use trusted files only). The labeled rows must be a test set it never saw, or the estimate comes out optimistic; the tool cannot check this. The model is never retrained: one "test set (as reported)" row replaces the CV rows. Columns of `predict_proba` must follow the sorted labels (checked when the model has `classes_`); a model fitted on named columns gets them by name.
-- `report.models`: the models behind the PPI rows: the correction split's fold models by default, or `[your object]` with `model` (wrapped if it is a function or was fitted on named columns). Call them on `report.data.X`; `report.data` holds only the rows the audit kept.
-- `folds=5`: k of every default (`kfold`) split; each fold model trains on (k-1)/k of the labels. A custom `assign` keeps its own k.
-- `n_jobs`: parallel processes for the bootstrap replicates; the same results for any value.
-- `light=True` caps deployment at a random 2,000 rows (the caption says how many of how many) and uses 50 boosting rounds; `progress=True` shows a progress bar (on in the CLI).
+### Data and protocols
 
-Geo defaults (`geo.defaults`, applied by the CLI when the table has `lat`/`lon` and you set no `protocols`): the four fetchable protocols `roadside`, `settlement`, `elevation`, `slope`.
+`Dataset.from_csv` and `Dataset.from_files(labeled, deploy=None)` read CSV, Parquet or Feather files. `Dataset.from_frame` accepts a pandas DataFrame.
 
-CLI flags: `--fit-model pkg.module:fit`, `--fit-propensity pkg.module:fit`, `--model pkg.module:obj`, `--folds K`, `--jobs J`, `--inclusion COL`, `--bootstrap N`, `--metric accuracy`, `--iwcv`; a module in the current folder needs `PYTHONPATH=. pappi audit ...`; in `--config`, `<key>_params` calls `fit_model`, `model` or `fit_propensity` as a factory with those arguments.
+`protocols` accepts `Protocol(name, z)` objects or registered names. `import pappi.geo` registers `roadside`, `settlement`, `elevation`, `slope`, `region` and `size`. The geo defaults are the four fetchable protocols: `roadside`, `settlement`, `elevation` and `slope`.
 
-A `--config` YAML sets the same keys plus custom protocols and splits:
+Each Z covariate is a column name or a `(name, fn)` pair, where `fn(frame)` returns an array. PaPPI calls the function only when the column is missing.
+
+### Models and metrics
+
+`fit_model` and `fit_propensity` accept functions `fit(X, y)` that return objects with `predict_proba(X)`. PaPPI calls each trainer once per fold. Probability columns must correspond to classes `0..K-1`. Both default trainers use XGBoost with the paper's settings.
+
+`model` accepts a trained object with `predict_proba(X)` or a function `f(X)` that returns probabilities. PaPPI never retrains it and replaces the CV rows with one "test set (as reported)" row. Its labeled rows must be an unseen test set; otherwise the estimate is optimistic. PaPPI cannot check this.
+
+Probability columns must follow the sorted labels. PaPPI checks their order when the model has `classes_` and passes named features by name when the model was fitted on them.
+
+```python
+report = audit(
+    Dataset.from_files("test.parquet", "deploy.parquet"),
+    model=my_model,
+    protocols=[Protocol("referral", z=["distance_to_clinic"])],
+)
+```
+
+`metric` accepts `MacroF1()` (the default), `Accuracy()`, or an object with `observed`, `expected`, `value`, `grad` and `score` methods.
+
+`report.frame` contains one row per estimate. `report.models` contains the correction split's fold models, or `[your object]` when you pass `model`. PaPPI wraps functions and models fitted on named columns. Call the returned models on `report.data.X`; `report.data` contains only the rows kept by the audit.
+
+### Folds
+
+`Split(name, groups, assign)` defines a fold split. `groups` is a column name or `(name, fn)` pair, and rows in the same group share a fold. A custom `assign(n, groups)` returns one fold ID per row. The default `kfold` assigns rows, or whole groups, to random folds.
+
+| Option | Purpose | Default |
+|---|---|---|
+| `in_domain` | These splits produce the CV rows. | One random row split. |
+| `correction_split` | This split supplies held-out predictions for the PPI correction. | `in_domain[0]`. |
+| `propensity_split` | This split trains the labeled-versus-deployment model across both row sets. | The correction groups on labeled rows, with each deployment row in its own group. |
+
+Spatially grouped audits need the same groups in `propensity_split` (Python only). Otherwise deployment neighbors of a held-out block remain in training, which can distort the propensity model and produce `auc` below 0.5.
+
+`folds=5` sets the number of folds for every default split. Each fold model trains on `(k-1)/k` of the labels. A custom `assign` controls its own number of folds.
+
+### Weights and intervals
+
+`inclusion` supplies known inclusion probabilities as a column name or a function `frame -> array`. The probabilities need only be proportional to the true inclusion probabilities. This option adds a "known inclusion" row.
+
+The default confidence interval uses the faster delta method, which treats labels as independent and weights as fixed. `interval=Bootstrap(n, groups, arms)` gives percentile intervals by resampling labels or label clusters and refitting the propensity model for each replicate. `groups` selects label clusters; by default, the bootstrap uses the correction split's groups, or individual rows when there are no groups.
+
+`arms` limits which estimates receive bootstrap intervals. For example, `("x",)` covers both the PPI row for X and its IWCV row, `iwcv_x`. PaPPI stores the bounds as `boot_lo` and `boot_hi` and displays them in the table. `n_jobs` sets the number of parallel bootstrap processes without changing the results.
+
+`iwcv=True` adds an importance-weighted CV (IWCV) row after each PPI row, with key `iwcv_<arm>`. It scores the held-out labels with the same weights but uses no deployment predictions. IWCV is nearly as accurate as PPI in the paper, with slightly higher per-run error.
+
+`light=True` samples at most 2,000 deployment rows and uses 50 boosting rounds. The caption reports the sample count and original count. `progress=True` shows a progress bar; the CLI enables it by default.
+
+## CLI configuration
+
+The CLI exposes `--fit-model pkg.module:fit`, `--fit-propensity pkg.module:fit`, `--model pkg.module:obj`, `--folds K`, `--jobs J`, `--inclusion COL`, `--bootstrap N`, `--metric accuracy` and `--iwcv`. Use `PYTHONPATH=. pappi audit ...` to load a module from the current folder.
+
+`--model` also accepts a `.pkl` or `.joblib` file. Loading these files runs their code, so use trusted files only.
+
+`--config` reads YAML with the same options, plus custom protocols and splits. `<key>_params` calls `fit_model`, `model` or `fit_propensity` as a factory with the supplied arguments.
 
 ```yaml
 label: band
@@ -117,7 +158,7 @@ jobs: 8
 
 ## Geo covariates
 
-Each covariate pairs a source (acquire) with a derivation (compute at points) and returns a `(name, fn)` pair:
+Each geo covariate returns a `(name, fn)` pair. Its source supplies vector or raster data, and its function computes values at the sample points:
 
 ```python
 geo.DistanceTo(geo.LocalVector("my_roads.gpkg"), "dist_to_road")
@@ -125,35 +166,24 @@ geo.SampleRaster(geo.LocalRaster("my_dem.tif"), "elevation")
 geo.SlopeOf(geo.CopernicusDEM(), "slope")
 ```
 
-Sources: `GeofabrikLayer(layer, fclass)`, `LocalVector(path)`, `CopernicusDEM()`, `LocalRaster(path)`; downloads are cached under `~/.cache/pappi`.
+The available sources are `GeofabrikLayer(layer, fclass)`, `LocalVector(path)`, `CopernicusDEM()` and `LocalRaster(path)`. PaPPI caches downloads under `~/.cache/pappi`.
 
 ## Output
 
-CV rows: in-domain cross-validation on the labels; with `model`, one "test set (as reported)" row
-instead. PPI rows: deployment estimate with the propensity model fit on X, Z, or both; `n_eff` is
-the effective number of labels behind it. IWCV rows (with `iwcv`) reweight the held-out labels
-with the same weights and skip the deployment predictions. The caption lists counts and notes such as
-`light mode: 2,000 of 5,000 deployment rows`. `report.frame` holds one row per estimate with the
-propensity `auc` (near 1: labeled and deployment rows barely overlap), medians, and
-`q_clip_share_l` (share of labels whose propensity hits the 1e-3 clip). Treat a PPI row with
-`n_eff` below a few dozen or `auc` near 1 as no usable estimate: its interval is not reliable.
+CV rows report in-domain cross-validation on the labels. A supplied `model` produces one "test set (as reported)" row instead. PPI rows estimate deployment performance with a propensity model fitted on X, Z or both. `n_eff` is the effective number of labels supporting the estimate. IWCV rows reweight the held-out labels with the same weights and omit deployment predictions.
+
+The caption reports row counts and notes such as `light mode: 2,000 of 5,000 deployment rows`. `report.frame` also includes the propensity `auc`, propensity medians and `q_clip_share_l`, the share of labels whose propensity reaches the 1e-3 clip.
+
+PPI estimates are not usable when `n_eff` is below a few dozen or `auc` is near 1. An AUC near 1 means the labeled and deployment rows barely overlap, and the interval is not reliable.
 
 ## Assumptions
 
-- Each PPI or IWCV row assumes that, given the covariates its propensity uses (X, Z, or both), whether a
-  row was labeled does not depend on its label.
-- Every kind of deployment row has some chance of being labeled. Where it has none, weights hit
-  the clip and `n_eff` falls.
+- Labeling must be independent of the class after conditioning on the propensity covariates (X, Z or both). Each PPI or IWCV row makes this assumption for its own covariates.
+- Every kind of deployment row must have some chance of being labeled. Weights hit the clip and `n_eff` falls where this assumption fails.
 - Deployment rows are a uniform sample of the population the estimate is about.
-- Held-out labels are as new to each fold model as deployment rows are. If labels come in
-  clusters (several rows per photo, field or transect), split by the cluster with
-  `Split(name, groups=...)` (the bootstrap then resamples whole clusters); the default row
-  split puts near-twins on both sides and biases the estimate.
+- Held-out labels must be as new to each fold model as deployment rows. Split clustered labels, such as several rows per photo, field or transect, with `Split(name, groups=...)`. The bootstrap then resamples whole clusters. The default row split can put near-duplicates on both sides and bias the estimate.
 - With `model`, the labeled rows were not used to train it.
-- With `fit_model`, the PPI rows estimate the mean deployment score of the correction split's
-  fold models, each trained on (k-1)/k of the labels: every fold model predicts the deployment
-  rows and is corrected on the labels it did not see. A model refit on all labels usually
-  scores a little higher.
+- With `fit_model`, PPI estimates the mean deployment score of the correction split's fold models, each trained on `(k-1)/k` of the labels. Each model predicts the deployment rows and is corrected on labels it did not see. A model refitted on all labels usually scores a little higher.
 - Labels are classes; the metrics are macro-F1 and accuracy.
 
 ## Tests
@@ -164,17 +194,9 @@ $ pip install pytest && pytest
 
 ## Data and licenses
 
-The repository holds no data: the demo campaign is generated by `pappi.demo`. With `[geo]`,
-PaPPI downloads OpenStreetMap (© OpenStreetMap contributors, ODbL) and Copernicus DEM GLO-30
-(© DLR e.V., © Airbus Defence and Space GmbH, provided under COPERNICUS by the EU and ESA)
-on your machine. Code is MIT-licensed ([LICENSE](LICENSE)); third-party packages and data
-attributions are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+The repository contains no data. `pappi.demo` generates the demo campaign. PaPPI with `[geo]` downloads OpenStreetMap (© OpenStreetMap contributors, ODbL) and Copernicus DEM GLO-30 (© DLR e.V., © Airbus Defence and Space GmbH, provided under COPERNICUS by the EU and ESA) on your machine. The code is MIT-licensed ([LICENSE](LICENSE)). [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists third-party packages and data attributions.
 
-Network use: with `[geo]`, PaPPI sends the bounding box of your points (never labels, features
-or the points themselves) to the Planetary Computer STAC API to find DEM tiles, then reads
-those tiles and the Geofabrik extracts that cover the box. Downloads are cached under
-`~/.cache/pappi`. To make no requests, put the Z columns in your table or use `LocalVector` /
-`LocalRaster`.
+PaPPI sends the bounding box of your points to the Planetary Computer STAC API to find DEM tiles. It never sends labels, features or the points themselves. It then reads the DEM tiles and Geofabrik extracts that cover the box and caches downloads under `~/.cache/pappi`. PaPPI makes no requests when you supply the Z columns or use `LocalVector` and `LocalRaster`.
 
 ## Citation
 
@@ -190,26 +212,14 @@ those tiles and the Geofabrik extracts that cover the box. Downloads are cached 
 
 ## Contributing
 
-This project welcomes contributions and suggestions. Most contributions require you to agree to a
-Contributor License Agreement (CLA) declaring that you have the right to, and actually do, grant us
-the rights to use your contribution. For details, visit https://cla.opensource.microsoft.com.
+This project welcomes contributions and suggestions. Most contributions require you to agree to a Contributor License Agreement (CLA) declaring that you have the right to, and actually do, grant us the rights to use your contribution. For details, visit https://cla.opensource.microsoft.com.
 
-When you submit a pull request, a CLA bot will automatically determine whether you need to provide
-a CLA and decorate the PR appropriately (e.g., status check, comment). Simply follow the
-instructions provided by the bot. You will only need to do this once across all repos using our CLA.
+When you submit a pull request, a CLA bot will automatically determine whether you need to provide a CLA and decorate the PR appropriately (e.g., status check, comment). Simply follow the instructions provided by the bot. You will only need to do this once across all repos using our CLA.
 
-This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/).
-For more information see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or
-contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
+This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/). For more information see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
 
-Authors are listed in [AUTHORS.md](AUTHORS.md). See [SUPPORT.md](SUPPORT.md) for help and
-[SECURITY.md](SECURITY.md) to report a vulnerability.
+Authors are listed in [AUTHORS.md](AUTHORS.md). See [SUPPORT.md](SUPPORT.md) for help and [SECURITY.md](SECURITY.md) to report a vulnerability.
 
 ## Trademarks
 
-This project may contain trademarks or logos for projects, products, or services. Authorized use of
-Microsoft trademarks or logos is subject to and must follow
-[Microsoft's Trademark & Brand Guidelines](https://www.microsoft.com/en-us/legal/intellectualproperty/trademarks/usage/general).
-Use of Microsoft trademarks or logos in modified versions of this project must not cause confusion
-or imply Microsoft sponsorship. Any use of third-party trademarks or logos is subject to those
-third-party's policies.
+This project may contain trademarks or logos for projects, products, or services. Authorized use of Microsoft trademarks or logos is subject to and must follow [Microsoft's Trademark & Brand Guidelines](https://www.microsoft.com/en-us/legal/intellectualproperty/trademarks/usage/general). Use of Microsoft trademarks or logos in modified versions of this project must not cause confusion or imply Microsoft sponsorship. Any use of third-party trademarks or logos is subject to those third-party's policies.
