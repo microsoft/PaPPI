@@ -99,7 +99,7 @@ Each Z covariate is a column name or a `(name, fn)` pair, where `fn(frame)` retu
 
 ### Models and metrics
 
-`fit_model` and `fit_propensity` accept functions `fit(X, y)` that return objects with `predict_proba(X)`. PaPPI calls each trainer once per fold. Probability columns must correspond to classes `0..K-1`. Both default trainers use XGBoost with the paper's settings.
+`fit_model` and `fit_propensity` accept functions `fit(X, y)` that return objects with `predict_proba(X)`. PaPPI calls each trainer once per fold. Probability columns must correspond to classes `0..K-1`. Both default trainers use XGBoost with the [paper](https://arxiv.org/abs/2611.00794)'s settings.
 
 `model` accepts a trained object with `predict_proba(X)` or a function `f(X)` that returns probabilities. PaPPI never retrains it and replaces the CV rows with one "test set (as reported)" row. Its labeled rows must be an unseen test set; otherwise the estimate is optimistic. PaPPI cannot check this.
 
@@ -211,6 +211,10 @@ PaPPI sends the bounding box of your points to the Planetary Computer STAC API t
             and Hacheme, Gilles Q. and Dodhia, Rahul and Becker-Reshef, Inbal
             and Lavista Ferres, Juan M.},
   year   = {2026},
+  eprint = {2611.00794},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.LG},
+  url    = {https://arxiv.org/abs/2611.00794},
 }
 ```
 
